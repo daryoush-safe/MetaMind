@@ -7,11 +7,9 @@ from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 from .state import AgentState, Plan, PlanStep, ExecutionResult
 from .tools.tool_registry import ALL_TOOLS
 
-load_dotenv()
-
 def get_llm(temperature: float = 0) -> ChatOpenAI:
     return ChatOpenAI(
-        model="llama-3.1-8b-instant",
+        model=os.environ.get("MODEL_NAME"),
         openai_api_key=os.environ.get("API_KEY"),
         openai_api_base=os.environ.get("API_BASE_URL"),
         temperature=temperature,
@@ -41,7 +39,7 @@ Problem Type to Method Mapping:
 - Control/Regression → Fuzzy, GP
 - Symbolic Regression → GP
 
-When creating a plan, you must output a JSON object with this structure:
+When creating a plan, you must output a JSON object with this structure, If the input IS a CI problem:
 {
     "problem_type": "tsp|classification|clustering|optimization|regression|pattern_completion",
     "selected_method": "method_name",
@@ -57,6 +55,17 @@ When creating a plan, you must output a JSON object with this structure:
     "backup_method": "alternative_method or null",
     "confidence": 0.85
 }
+
+If it is NOT a CI problem, follow this structure:
+{
+    "problem_type": "general_chat",
+    "selected_method": "none",
+    "reasoning": "The user is engaging in general conversation/introduction.",
+    "steps": [],
+    "backup_method": null,
+    "confidence": 1.0
+}
+
 
 Important rules:
 1. For methods with train/inference split, always train first, then inference
@@ -98,6 +107,7 @@ After reviewing the execution results, you must decide:
 2. **Adjust**: Modify parameters and retry the current step
 3. **Replan**: Create a new plan with different method/approach
 4. **Complete**: The task is finished, generate final response
+5. **Direct**: If the Planner identified the input as `general_chat` (no steps in plan), set decision to `complete` and write a friendly, helpful response in `final_response`.
 
 Output your decision as JSON:
 {
@@ -139,7 +149,8 @@ def plan_step(state: AgentState) ->AgentState:
 Remember to output a valid JSON plan.""")
     ]
 
-    response = planner_llm.invoke(messages=message)
+    history = state["messages"][-10:-1]
+    response = planner_llm.invoke(message + history)
 
     try:
         response_text = response.content
@@ -181,12 +192,12 @@ Remember to output a valid JSON plan.""")
         )
     
     # Update state
-    new_messages = list(state["messages"]) + [
+    new_messages = [
+        HumanMessage(content=user_input),
         AIMessage(content=f"Created plan: {plan.model_dump_json(indent=2)}")
     ]
     
     return {
-        **state,
         "messages": new_messages,
         "plan": plan,
         "current_step_index": 0,
@@ -209,7 +220,6 @@ def execute_step(state: AgentState) ->AgentState:
 
     if plan is None or current_index >= len(plan.steps):
         return {
-            **state,
             "should_replan": False,
             "iteration_count": state.get("iteration_count", 0) + 1
         }
@@ -233,7 +243,8 @@ Call the appropriate tool now."""
     ]
     
     model_with_tools = get_llm().bind_tools(ALL_TOOLS)
-    response = model_with_tools.invoke(messages)
+    history = state["messages"][-10:-1]
+    response = model_with_tools.invoke(messages + history)
     
     result = None
     new_model_store = dict(state.get("model_store", {}))
@@ -267,12 +278,11 @@ Call the appropriate tool now."""
     new_past_steps = list(state.get("past_steps", [])) + [(current_step, result)]
     
     # Update messages
-    new_messages = list(state["messages"]) + [
+    new_messages = [
         AIMessage(content=f"Executed step {current_step.step_id}: {json.dumps(result, default=str)[:500]}")
     ]
     
     return {
-        **state,
         "messages": new_messages,
         "past_steps": new_past_steps,
         "current_step_index": current_index + 1,
@@ -321,8 +331,9 @@ Decide: continue, adjust, replan, or complete?"""
         SystemMessage(content=REPLANNER_SYSTEM_PROMPT),
         HumanMessage(content=eval_prompt)
     ]
-    
-    response = replanner_llm.invoke(messages)
+
+    history = state["messages"][-10:-1]
+    response = replanner_llm.invoke(messages + history)
     
     # Parse decision
     try:
@@ -346,12 +357,9 @@ Decide: continue, adjust, replan, or complete?"""
     # Update state based on decision
     should_continue = decision in ["continue", "adjust"]
     
-    new_messages = list(state["messages"]) + [
-        AIMessage(content=f"Replanner decision: {decision}")
-    ]
+    new_messages = [AIMessage(content=f"Replanner decision: {decision}")]
     
     return {
-        **state,
         "messages": new_messages,
         "should_replan": should_continue,
         "final_response": final_response,
