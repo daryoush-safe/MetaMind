@@ -1,29 +1,86 @@
 import numpy as np
+import uuid
+from typing import List, Optional, Any, Dict
 from pydantic import Field
 from langchain_core.tools import tool
 
+# In-memory model storage (in production, use Redis or a database)
+MODEL_STORE: Dict[str, Any] = {}
+
 
 class Perceptron:
-    def __init__(self, learning_rate=0.01, max_epochs=100, bias=True):
+    """
+    A single-layer Perceptron classifier for binary classification tasks.
+    
+    The Perceptron is a fundamental neural network unit that learns a linear
+    decision boundary to separate two classes. It uses the Heaviside step
+    function for activation and updates weights using the Perceptron Learning Rule.
+    
+    Attributes:
+        learning_rate (float): Step size for weight updates during training.
+        max_epochs (int): Maximum number of passes over the training data.
+        use_bias (bool): Whether to include a bias term in the model.
+        weights (np.ndarray): Learned weight vector for input features.
+        bias_weight (float): Learned bias term (if use_bias is True).
+    
+    Example:
+        >>> perceptron = Perceptron(learning_rate=0.01, max_epochs=100)
+        >>> perceptron.fit(X_train, y_train)
+        >>> predictions = perceptron.predict(X_test)
+    """
+    
+    def __init__(self, learning_rate: float = 0.01, max_epochs: int = 100, bias: bool = True):
         """
+        Initialize the Perceptron classifier.
+        
         Args:
-            learning_rate (float): Step size for weight updates (0.001-0.1).
-            max_epochs (int): Maximum iterations over the dataset (50-1000).
-            bias (bool): Whether to include a bias term.
+            learning_rate (float): Step size for weight updates. Higher values
+                lead to faster but potentially unstable learning. Range: 0.001-0.1.
+                Default: 0.01.
+            max_epochs (int): Maximum number of iterations over the entire dataset.
+                Training stops early if the model converges. Range: 50-1000.
+                Default: 100.
+            bias (bool): Whether to include a bias term. The bias allows the
+                decision boundary to be offset from the origin. Default: True.
         """
         self.learning_rate = learning_rate
         self.max_epochs = max_epochs
         self.use_bias = bias
-        self.weights = None
-        self.bias_weight = 0.0
+        self.weights: Optional[np.ndarray] = None
+        self.bias_weight: float = 0.0
+        self._is_fitted: bool = False
 
-    def fit(self, X, y):
-        n_samples, n_features = X.shape
-        # Initialize weights
-        self.weights = np.zeros(n_features)
-        self.bias_weight = 0.0 if self.use_bias else 0.0
+    def fit(self, X: np.ndarray, y: np.ndarray) -> 'Perceptron':
+        """
+        Train the Perceptron on the provided data.
         
-        for _ in range(self.max_epochs):
+        Uses the Perceptron Learning Rule: w = w + lr * (target - predicted) * x
+        Training continues until convergence (no errors) or max_epochs is reached.
+        
+        Args:
+            X (np.ndarray): Training features of shape (n_samples, n_features).
+            y (np.ndarray): Binary target labels of shape (n_samples,).
+                Values should be 0 or 1.
+        
+        Returns:
+            Perceptron: The fitted model instance (self).
+        
+        Raises:
+            ValueError: If X and y have incompatible shapes.
+        """
+        X = np.asarray(X)
+        y = np.asarray(y)
+        
+        if X.shape[0] != y.shape[0]:
+            raise ValueError(f"X and y must have same number of samples. Got {X.shape[0]} and {y.shape[0]}")
+        
+        n_samples, n_features = X.shape
+        
+        # Initialize weights to zeros
+        self.weights = np.zeros(n_features)
+        self.bias_weight = 0.0
+        
+        for epoch in range(self.max_epochs):
             errors = 0
             for i in range(n_samples):
                 # Calculate linear output
@@ -31,10 +88,10 @@ class Perceptron:
                 if self.use_bias:
                     linear_output += self.bias_weight
                 
-                # Heaviside step function
+                # Heaviside step function activation
                 y_pred = 1 if linear_output >= 0 else 0
                 
-                # Update rule: w = w + lr * (target - predicted) * x
+                # Perceptron update rule
                 update = self.learning_rate * (y[i] - y_pred)
                 
                 self.weights += update * X[i]
@@ -44,32 +101,208 @@ class Perceptron:
                 if update != 0:
                     errors += 1
             
-            # Early stopping if converged
+            # Early stopping if converged (no misclassifications)
             if errors == 0:
                 break
+        
+        self._is_fitted = True
+        return self
 
-    def predict(self, X):
+    def predict(self, X: np.ndarray) -> np.ndarray:
+        """
+        Predict class labels for samples in X.
+        
+        Args:
+            X (np.ndarray): Feature matrix of shape (n_samples, n_features).
+        
+        Returns:
+            np.ndarray: Predicted class labels (0 or 1) of shape (n_samples,).
+        
+        Raises:
+            RuntimeError: If the model has not been fitted yet.
+        """
+        if not self._is_fitted:
+            raise RuntimeError("Model must be fitted before making predictions. Call fit() first.")
+        
+        X = np.asarray(X)
         linear_output = np.dot(X, self.weights)
         if self.use_bias:
             linear_output += self.bias_weight
         return np.where(linear_output >= 0, 1, 0)
+    
+    def get_params(self) -> Dict[str, Any]:
+        """Return model parameters as a dictionary."""
+        return {
+            'learning_rate': self.learning_rate,
+            'max_epochs': self.max_epochs,
+            'use_bias': self.use_bias,
+            'weights': self.weights.tolist() if self.weights is not None else None,
+            'bias_weight': self.bias_weight,
+            'is_fitted': self._is_fitted
+        }
 
 
 @tool
-def perceptron_tool(
-    learning_rate: float = Field(default=0.01, ge=0.001, le=0.1),
-    max_epochs: int = Field(default=100, ge=50, le=1000),
-    bias: bool = Field(default=True),
-):
+def train_perceptron_tool(
+    X_train: List[List[float]] = Field(description="Training feature matrix as a 2D list of shape (n_samples, n_features)"),
+    y_train: List[int] = Field(description="Training labels as a list of binary values (0 or 1)"),
+    learning_rate: float = Field(default=0.01, ge=0.001, le=0.1, description="Learning rate for weight updates. Higher values mean faster but potentially unstable learning."),
+    max_epochs: int = Field(default=100, ge=50, le=1000, description="Maximum number of training iterations over the dataset."),
+    bias: bool = Field(default=True, description="Whether to include a bias term in the model.")
+) -> Dict[str, Any]:
     """
-    Create and return a Perceptron instance with specified hyperparameters.
-
+    Train a Perceptron classifier on the provided dataset.
+    
+    The Perceptron is a fundamental neural network unit suitable for linearly
+    separable binary classification problems. It learns a linear decision boundary
+    using the Perceptron Learning Rule.
+    
+    **When to use:**
+    - Binary classification tasks
+    - When data is linearly separable or nearly so
+    - When interpretability is important (weights directly show feature importance)
+    - As a baseline before trying more complex models
+    
+    **Limitations:**
+    - Cannot solve non-linearly separable problems (e.g., XOR)
+    - Only supports binary classification
+    - May not converge if data is not linearly separable
+    
+    **Parameters Guide:**
+    - learning_rate: Start with 0.01. Increase to 0.1 for faster training or
+      decrease to 0.001 for more stable convergence.
+    - max_epochs: 100 is usually sufficient for small datasets. Increase for
+      larger or more complex datasets.
+    - bias: Keep True unless you specifically want the decision boundary to
+      pass through the origin.
+    
     Args:
-        learning_rate (float): Step size for weight updates (0.001-0.1).
-        max_epochs (int): Maximum iterations over the dataset (50-1000).
-        bias (bool): Whether to include a bias term.
-
+        X_train: Training feature matrix as a 2D list. Each inner list represents
+            one sample's features.
+        y_train: Training labels as a list of binary values (0 or 1).
+        learning_rate: Step size for weight updates (0.001-0.1). Default: 0.01.
+        max_epochs: Maximum training iterations (50-1000). Default: 100.
+        bias: Whether to include a bias term. Default: True.
+    
     Returns:
-        Perceptron: Configured Perceptron instance.
+        Dict containing:
+            - model_id (str): Unique identifier for the trained model
+            - status (str): "success" or "error"
+            - message (str): Status message
+            - weights (List[float]): Learned feature weights
+            - bias_weight (float): Learned bias term
+            - n_features (int): Number of input features
+            - n_samples (int): Number of training samples
+    
+    Example:
+        >>> result = train_perceptron_tool(
+        ...     X_train=[[0, 0], [0, 1], [1, 0], [1, 1]],
+        ...     y_train=[0, 0, 0, 1],
+        ...     learning_rate=0.1,
+        ...     max_epochs=100
+        ... )
+        >>> print(result['model_id'])  # Use this ID for inference
     """
-    pass
+    try:
+        X = np.array(X_train)
+        y = np.array(y_train)
+        
+        # Validate inputs
+        if len(X.shape) != 2:
+            return {"status": "error", "message": "X_train must be a 2D array"}
+        if len(y.shape) != 1:
+            return {"status": "error", "message": "y_train must be a 1D array"}
+        if X.shape[0] != y.shape[0]:
+            return {"status": "error", "message": f"X_train and y_train must have same number of samples"}
+        if not all(label in [0, 1] for label in y):
+            return {"status": "error", "message": "y_train must contain only binary labels (0 or 1)"}
+        
+        # Create and train model
+        model = Perceptron(
+            learning_rate=learning_rate,
+            max_epochs=max_epochs,
+            bias=bias
+        )
+        model.fit(X, y)
+        
+        # Store model with unique ID
+        model_id = f"perceptron_{uuid.uuid4().hex[:8]}"
+        MODEL_STORE[model_id] = model
+        
+        return {
+            "status": "success",
+            "message": f"Perceptron trained successfully on {X.shape[0]} samples with {X.shape[1]} features",
+            "model_id": model_id,
+            "weights": model.weights.tolist(),
+            "bias_weight": model.bias_weight,
+            "n_features": X.shape[1],
+            "n_samples": X.shape[0]
+        }
+        
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+@tool
+def inference_perceptron_tool(
+    model_id: str = Field(description="The unique model ID returned from train_perceptron_tool"),
+    X_test: List[List[float]] = Field(description="Test feature matrix as a 2D list of shape (n_samples, n_features)")
+) -> Dict[str, Any]:
+    """
+    Make predictions using a trained Perceptron model.
+    
+    Uses a previously trained Perceptron model (identified by model_id) to
+    predict binary class labels for new samples.
+    
+    **Usage:**
+    1. First train a model using train_perceptron_tool to get a model_id
+    2. Use this tool with that model_id to make predictions
+    
+    Args:
+        model_id: The unique identifier returned from train_perceptron_tool.
+        X_test: Test feature matrix as a 2D list. Must have the same number
+            of features as the training data.
+    
+    Returns:
+        Dict containing:
+            - status (str): "success" or "error"
+            - message (str): Status message
+            - predictions (List[int]): Predicted class labels (0 or 1)
+            - n_samples (int): Number of samples predicted
+    
+    Example:
+        >>> result = inference_perceptron_tool(
+        ...     model_id="perceptron_abc12345",
+        ...     X_test=[[0.5, 0.5], [1.0, 1.0]]
+        ... )
+        >>> print(result['predictions'])  # [0, 1]
+    """
+    try:
+        # Retrieve model
+        if model_id not in MODEL_STORE:
+            return {"status": "error", "message": f"Model '{model_id}' not found. Train a model first."}
+        
+        model = MODEL_STORE[model_id]
+        X = np.array(X_test)
+        
+        # Validate input dimensions
+        if len(X.shape) != 2:
+            return {"status": "error", "message": "X_test must be a 2D array"}
+        if X.shape[1] != len(model.weights):
+            return {
+                "status": "error", 
+                "message": f"X_test has {X.shape[1]} features but model expects {len(model.weights)}"
+            }
+        
+        # Make predictions
+        predictions = model.predict(X)
+        
+        return {
+            "status": "success",
+            "message": f"Successfully predicted {len(predictions)} samples",
+            "predictions": predictions.tolist(),
+            "n_samples": len(predictions)
+        }
+        
+    except Exception as e:
+        return {"status": "error", "message": str(e)}

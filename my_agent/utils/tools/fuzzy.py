@@ -1,76 +1,93 @@
 import numpy as np
-from typing import Literal
+import uuid
+from typing import List, Optional, Any, Dict, Literal, Tuple
 from pydantic import Field
 from langchain_core.tools import tool
 
+# In-memory model storage
+MODEL_STORE: Dict[str, Any] = {}
+
 
 class FuzzyController:
-    def __init__(self, n_membership_functions=3, membership_type="triangular", 
-                 defuzzification="centroid", rule_generation="wang_mendel"):
+    """
+    Fuzzy Logic Controller with automatic rule generation.
+    
+    A fuzzy inference system that learns fuzzy rules from data using the
+    Wang-Mendel method. The system fuzzifies inputs, evaluates learned rules,
+    and defuzzifies to produce crisp outputs.
+    """
+    
+    def __init__(
+        self,
+        n_membership_functions: int = 3,
+        membership_type: str = "triangular",
+        defuzzification: str = "centroid",
+        rule_generation: str = "wang_mendel"
+    ):
         self.n_mf = n_membership_functions
         self.mf_type = membership_type
         self.defuz_method = defuzzification
         self.rule_gen_method = rule_generation
-        self.rules = []
-        self.var_ranges = []  # Min/Max for each feature
+        self.rules: Dict = {}
+        self.var_ranges: List[Tuple[float, float]] = []
+        self.mf_params: List[List[Tuple[float, float]]] = []
+        self._is_fitted: bool = False
+        self._n_features: int = 0
 
-    def _membership(self, x, center, width):
-        """Calculates membership degree mu(x)."""
+    def _membership(self, x: float, center: float, width: float) -> float:
+        """Calculate membership degree for a value in a fuzzy set."""
         if self.mf_type == "triangular":
-            # trimf: max(min((x-a)/(b-a), (c-x)/(c-b)), 0)
             a, b, c = center - width, center, center + width
-            if width == 0: return 1.0 if x == center else 0.0
-            return max(min((x - a) / (b - a), (c - x) / (c - b)), 0)
+            if width == 0:
+                return 1.0 if x == center else 0.0
+            return max(min((x - a) / (b - a + 1e-10), (c - x) / (c - b + 1e-10)), 0)
         elif self.mf_type == "gaussian":
-            # gaussmf: exp(-(x - c)^2 / (2*sigma^2))
-            sigma = width / 2.0  # approximate width mapping
-            return np.exp(-((x - center) ** 2) / (2 * sigma ** 2))
+            sigma = width / 2.0
+            return np.exp(-((x - center) ** 2) / (2 * sigma ** 2 + 1e-10))
         elif self.mf_type == "trapezoidal":
-            # trapmf: simplified symmetric trapezoid
-            a, b, c, d = center - width, center - width/2, center + width/2, center + width
-            if width == 0: return 1.0 if x == center else 0.0
-            return max(min((x - a) / (b - a), 1, (d - x) / (d - c)), 0)
+            a = center - width
+            b = center - width / 2
+            c = center + width / 2
+            d = center + width
+            if width == 0:
+                return 1.0 if x == center else 0.0
+            return max(min((x - a) / (b - a + 1e-10), 1, (d - x) / (d - c + 1e-10)), 0)
         return 0.0
 
-    def fit(self, X, y):
-        """Generates rules using Wang-Mendel method."""
-        X = np.array(X)
-        y = np.array(y).reshape(-1, 1)
+    def fit(self, X: np.ndarray, y: np.ndarray) -> 'FuzzyController':
+        """Learn fuzzy rules from data using Wang-Mendel method."""
+        X = np.asarray(X)
+        y = np.asarray(y).reshape(-1, 1)
         data = np.hstack((X, y))
         n_features = data.shape[1]
+        self._n_features = X.shape[1]
         
-        # 1. Determine ranges and grid for inputs/outputs
         self.var_ranges = []
-        self.mf_params = [] # List of list of (center, width)
+        self.mf_params = []
         
         for i in range(n_features):
             d_min, d_max = np.min(data[:, i]), np.max(data[:, i])
             self.var_ranges.append((d_min, d_max))
-            
-            step = (d_max - d_min) / (self.n_mf - 1)
+            step = (d_max - d_min) / (self.n_mf - 1) if self.n_mf > 1 else 0
             params = []
             for m in range(self.n_mf):
                 center = d_min + m * step
-                params.append((center, step))
+                width = step if step > 0 else 1.0
+                params.append((center, width))
             self.mf_params.append(params)
 
-        # 2. Generate Rules from Data
         if self.rule_gen_method == "wang_mendel":
             raw_rules = []
             for row in data:
-                # Find fuzzy region with max membership for each variable
                 rule_indices = []
                 degree = 1.0
                 for i, val in enumerate(row):
                     mu_vals = [self._membership(val, p[0], p[1]) for p in self.mf_params[i]]
                     idx = np.argmax(mu_vals)
                     rule_indices.append(idx)
-                    degree *= mu_vals[idx] # Rule strength
-                
-                # Format: (input_indices_tuple, output_index, degree)
+                    degree *= mu_vals[idx]
                 raw_rules.append((tuple(rule_indices[:-1]), rule_indices[-1], degree))
 
-            # 3. Handle Conflicting Rules (keep max degree)
             rule_dict = {}
             for inputs, output, deg in raw_rules:
                 if inputs in rule_dict:
@@ -78,65 +95,196 @@ class FuzzyController:
                         rule_dict[inputs] = {'out': output, 'degree': deg}
                 else:
                     rule_dict[inputs] = {'out': output, 'degree': deg}
-            
             self.rules = rule_dict
+        
+        self._is_fitted = True
+        return self
 
-    def predict(self, X):
+    def predict(self, X: np.ndarray) -> np.ndarray:
+        """Predict output values using fuzzy inference."""
+        if not self._is_fitted:
+            raise RuntimeError("Controller must be fitted before prediction.")
+        
+        X = np.asarray(X)
         predictions = []
+        
         for row in X:
-            # 1. Fuzzify Inputs & Evaluate Rules
-            # Aggregation: Maximize firing strength for output regions
-            # Initialize aggregate output fuzzy set (discretized for centroid calc)
             out_min, out_max = self.var_ranges[-1]
             y_points = np.linspace(out_min, out_max, 100)
             agg_output = np.zeros_like(y_points)
             
             for rule_in, rule_meta in self.rules.items():
                 out_idx = rule_meta['out']
-                
-                # Calculate Firing Strength (Min operator for AND)
                 mu_vals = []
                 for i, r_idx in enumerate(rule_in):
                     c, w = self.mf_params[i][r_idx]
                     mu_vals.append(self._membership(row[i], c, w))
-                firing_strength = np.min(mu_vals)
+                firing_strength = np.min(mu_vals) if mu_vals else 0
                 
                 if firing_strength > 0:
-                    # Implication (Min operator): Clip output MF
                     c_out, w_out = self.mf_params[-1][out_idx]
-                    rule_output = np.array([min(firing_strength, self._membership(y, c_out, w_out)) for y in y_points])
-                    
-                    # Aggregation (Max operator)
+                    rule_output = np.array([
+                        min(firing_strength, self._membership(y, c_out, w_out))
+                        for y in y_points
+                    ])
                     agg_output = np.maximum(agg_output, rule_output)
 
-            # 2. Defuzzification
             if np.sum(agg_output) == 0:
-                predictions.append((out_min + out_max) / 2) # Default fallback
+                predictions.append((out_min + out_max) / 2)
                 continue
 
             if self.defuz_method == "centroid":
-                numerator = np.sum(y_points * agg_output)
-                denominator = np.sum(agg_output)
-                predictions.append(numerator / denominator)
-            elif self.defuz_method == "mom": # Mean of Maxima
+                predictions.append(np.sum(y_points * agg_output) / np.sum(agg_output))
+            elif self.defuz_method == "mom":
                 max_val = np.max(agg_output)
                 indices = np.where(agg_output == max_val)[0]
                 predictions.append(np.mean(y_points[indices]))
             else:
-                # Fallback to centroid
-                numerator = np.sum(y_points * agg_output)
-                denominator = np.sum(agg_output)
-                predictions.append(numerator / denominator)
-                
+                predictions.append(np.sum(y_points * agg_output) / np.sum(agg_output))
+        
         return np.array(predictions)
 
 
 @tool
-def fuzzy_tool(
-    n_membership_functions: Literal[3, 5, 7] = Field(default=3),
-    membership_type: Literal["triangular", "gaussian", "trapezoidal"] = Field(default="triangular"),
-    defuzzification: Literal["centroid", "bisector", "mom", "som", "lom"] = Field(default="centroid"),
-    rule_generation: Literal["wang_mendel", "manual"] = Field(default="wang_mendel"),
-):
-    """Creates a Fuzzy Logic Controller tool with specified hyperparameters."""
-    pass
+def train_fuzzy_tool(
+    X_train: List[List[float]] = Field(description="Training input features as a 2D list of shape (n_samples, n_features)"),
+    y_train: List[float] = Field(description="Training output values as a 1D list of shape (n_samples,)"),
+    n_membership_functions: Literal[3, 5, 7] = Field(default=3, description="Number of fuzzy sets per variable (3=Low/Med/High, 5 or 7 for finer granularity)"),
+    membership_type: Literal["triangular", "gaussian", "trapezoidal"] = Field(default="triangular", description="Shape of membership functions"),
+    defuzzification: Literal["centroid", "bisector", "mom", "som", "lom"] = Field(default="centroid", description="Method to convert fuzzy output to crisp value"),
+    rule_generation: Literal["wang_mendel", "manual"] = Field(default="wang_mendel", description="Rule generation method")
+) -> Dict[str, Any]:
+    """
+    Train a Fuzzy Logic Controller for regression/control tasks.
+    
+    Fuzzy controllers use linguistic variables and IF-THEN rules to model
+    complex relationships. They're particularly useful when interpretability
+    is important and the system has inherent vagueness or imprecision.
+    
+    **When to use:**
+    - Control systems (temperature, motor speed, robot navigation)
+    - Decision support systems requiring interpretable rules
+    - Modeling expert knowledge
+    - Regression with non-linear relationships
+    
+    **Membership functions:**
+    - n_mf=3: "Low", "Medium", "High" - coarse granularity
+    - n_mf=5: Adds "Very Low" and "Very High"
+    - n_mf=7: Even finer granularity for precise control
+    
+    **Membership function types:**
+    - triangular: Simple, efficient, good for most cases
+    - gaussian: Smooth transitions, natural for sensor data
+    - trapezoidal: Robust to noise, has "plateau" region
+    
+    Args:
+        X_train: Input features as a 2D list (n_samples, n_features).
+        y_train: Output values as a 1D list (n_samples,).
+        n_membership_functions: Fuzzy sets per variable (3, 5, or 7). Default: 3.
+        membership_type: MF shape. Default: "triangular".
+        defuzzification: Output method. Default: "centroid".
+        rule_generation: Rule learning method. Default: "wang_mendel".
+    
+    Returns:
+        Dict containing:
+            - model_id (str): Unique identifier for the trained controller
+            - status (str): "success" or "error"
+            - n_rules (int): Number of learned rules
+            - output_range (Tuple[float, float]): Min/max output values
+    
+    Example:
+        >>> result = train_fuzzy_tool(
+        ...     X_train=[[20, 30], [25, 35], [30, 40]],
+        ...     y_train=[50, 60, 70],
+        ...     n_membership_functions=5
+        ... )
+    """
+    try:
+        X = np.array(X_train)
+        y = np.array(y_train)
+        
+        if len(X.shape) != 2:
+            return {"status": "error", "message": "X_train must be a 2D array"}
+        if len(y.shape) != 1:
+            return {"status": "error", "message": "y_train must be a 1D array"}
+        if X.shape[0] != y.shape[0]:
+            return {"status": "error", "message": "X_train and y_train must have same number of samples"}
+        
+        model = FuzzyController(
+            n_membership_functions=n_membership_functions,
+            membership_type=membership_type,
+            defuzzification=defuzzification,
+            rule_generation=rule_generation
+        )
+        model.fit(X, y)
+        
+        model_id = f"fuzzy_{uuid.uuid4().hex[:8]}"
+        MODEL_STORE[model_id] = model
+        
+        return {
+            "status": "success",
+            "message": f"Fuzzy controller trained with {len(model.rules)} rules",
+            "model_id": model_id,
+            "n_features": X.shape[1],
+            "n_samples": X.shape[0],
+            "n_rules": len(model.rules),
+            "n_membership_functions": n_membership_functions,
+            "output_range": model.var_ranges[-1] if model.var_ranges else None
+        }
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+@tool
+def inference_fuzzy_tool(
+    model_id: str = Field(description="The unique model ID returned from train_fuzzy_tool"),
+    X_test: List[List[float]] = Field(description="Test input features as a 2D list of shape (n_samples, n_features)")
+) -> Dict[str, Any]:
+    """
+    Make predictions using a trained Fuzzy Controller.
+    
+    Applies fuzzy inference to predict output values:
+    1. Fuzzify inputs (calculate membership degrees)
+    2. Evaluate rules (determine firing strengths)
+    3. Aggregate rule outputs
+    4. Defuzzify to get crisp predictions
+    
+    Args:
+        model_id: Unique identifier from train_fuzzy_tool.
+        X_test: Test inputs as a 2D list (n_samples, n_features).
+    
+    Returns:
+        Dict containing:
+            - status (str): "success" or "error"
+            - predictions (List[float]): Predicted output values
+            - n_samples (int): Number of samples predicted
+    
+    Example:
+        >>> result = inference_fuzzy_tool(
+        ...     model_id="fuzzy_abc12345",
+        ...     X_test=[[22, 32], [28, 38]]
+        ... )
+        >>> print(result['predictions'])
+    """
+    try:
+        if model_id not in MODEL_STORE:
+            return {"status": "error", "message": f"Model '{model_id}' not found."}
+        
+        model = MODEL_STORE[model_id]
+        X = np.array(X_test)
+        
+        if len(X.shape) != 2:
+            return {"status": "error", "message": "X_test must be a 2D array"}
+        if X.shape[1] != model._n_features:
+            return {"status": "error", "message": f"Expected {model._n_features} features, got {X.shape[1]}"}
+        
+        predictions = model.predict(X)
+        
+        return {
+            "status": "success",
+            "message": f"Successfully predicted {len(predictions)} samples",
+            "predictions": predictions.tolist(),
+            "n_samples": len(predictions)
+        }
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
