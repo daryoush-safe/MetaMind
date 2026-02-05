@@ -195,28 +195,17 @@ class Perceptron:
 
 
 class TrainPerceptronInput(BaseModel):
-    X_train: List[List[float]] = Field(
-        description="Training feature matrix as a 2D list of shape (n_samples, n_features)",
-    )
-    y_train: List[int] = Field(
-        description="Training labels as a list of binary values (0 or 1)",
-    )
-    learning_rate: float = Field(
-        default=0.01,
-        ge=0.001,
-        le=0.1,
-        description="Learning rate for weight updates. Higher values mean faster but potentially unstable learning.",
-    )
-    max_epochs: int = Field(
-        default=100,
-        ge=50,
-        le=1000,
-        description="Maximum number of training iterations over the dataset.",
-    )
-    bias: bool = Field(
-        default=True,
-        description="Whether to include a bias term in the model.",
-    )
+    X_train: List[List[float]] = Field(description="Training feature matrix as a 2D list of shape (n_samples, n_features)")
+    y_train: List[int] = Field(description="Training labels as a list of binary values (0 or 1)")
+    learning_rate: float = Field(default=0.01, ge=0.001, le=0.1, description="Learning rate for weight updates. Higher values mean faster but potentially unstable learning.")
+    max_epochs: int = Field(default=100, ge=50, le=1000, description="Maximum number of training iterations over the dataset.")
+    bias: bool = Field(default=True, description="Whether to include a bias term in the model.")
+
+
+class InferencePerceptronInput(BaseModel):
+    model_id: str = Field(description="The unique model ID returned from train_perceptron_tool")
+    X_test: List[List[float]] = Field(description="Test feature matrix as a 2D list of shape (n_samples, n_features)")
+    y_true: Optional[List[int]] = Field(default=None, description="Optional ground truth labels for computing metrics (list of 0s and 1s)")
 
 
 @tool(args_schema=TrainPerceptronInput)
@@ -252,35 +241,18 @@ def train_perceptron_tool(
       larger or more complex datasets.
     - bias: Keep True unless you specifically want the decision boundary to
       pass through the origin.
-    
-    Args:
-        X_train: Training feature matrix as a 2D list. Each inner list represents
-            one sample's features.
-        y_train: Training labels as a list of binary values (0 or 1).
-        learning_rate: Step size for weight updates (0.001-0.1). Default: 0.01.
-        max_epochs: Maximum training iterations (50-1000). Default: 100.
-        bias: Whether to include a bias term. Default: True.
-    
+
     Returns:
         Dict containing:
-            - model_id (str): Unique identifier for the trained model
-            - status (str): "success" or "error"
-            - message (str): Status message
-            - weights (List[float]): Learned feature weights
-            - bias_weight (float): Learned bias term
-            - n_features (int): Number of input features
-            - n_samples (int): Number of training samples
-            - converged (bool): Whether training converged
-            - epochs_run (int): Actual number of epochs run
-    
-    Example:
-        >>> result = train_perceptron_tool(
-        ...     X_train=[[0, 0], [0, 1], [1, 0], [1, 1]],
-        ...     y_train=[0, 0, 0, 1],
-        ...     learning_rate=0.1,
-        ...     max_epochs=100
-        ... )
-        >>> print(result['model_id'])  # Use this ID for inference
+            - model_id: Unique identifier for the trained model
+            - status: "success" or "error"
+            - message: Status message
+            - weights: Learned feature weights
+            - bias_weight: Learned bias term
+            - n_features: Number of input features
+            - n_samples: Number of training samples
+            - converged: Whether training converged
+            - epochs_run: Actual number of epochs run
     """
     try:
         X = np.array(X_train)
@@ -327,11 +299,11 @@ def train_perceptron_tool(
         return {"status": "error", "message": str(e)}
 
 
-@tool
+@tool(args_schema=InferencePerceptronInput)
 def inference_perceptron_tool(
-    model_id: str = Field(description="The unique model ID returned from train_perceptron_tool"),
-    X_test: List[List[float]] = Field(description="Test feature matrix as a 2D list of shape (n_samples, n_features)"),
-    y_true: Optional[List[int]] = Field(default=None, description="Optional ground truth labels for computing metrics (list of 0s and 1s)")
+    model_id: str,
+    X_test: List[List[float]],
+    y_true: Optional[List[int]] = None,
 ) -> Dict[str, Any]:
     """
     Make predictions using a trained Perceptron model.
@@ -343,36 +315,13 @@ def inference_perceptron_tool(
     1. First train a model using train_perceptron_tool to get a model_id
     2. Use this tool with that model_id to make predictions
     
-    **Metrics (when y_true is provided):**
-    If ground truth labels are provided, the tool computes:
-    - Accuracy: Overall correctness
-    - Precision: True positives / (True positives + False positives)
-    - Recall: True positives / (True positives + False negatives)
-    - F1 Score: Harmonic mean of precision and recall
-    - Confusion Matrix: TP, TN, FP, FN counts
-    
-    Args:
-        model_id: The unique identifier returned from train_perceptron_tool.
-        X_test: Test feature matrix as a 2D list. Must have the same number
-            of features as the training data.
-        y_true: Optional ground truth labels for computing metrics.
-    
     Returns:
         Dict containing:
-            - status (str): "success" or "error"
-            - message (str): Status message
-            - predictions (List[int]): Predicted class labels (0 or 1)
-            - n_samples (int): Number of samples predicted
-            - metrics (Dict): Classification metrics (only if y_true provided)
-    
-    Example:
-        >>> result = inference_perceptron_tool(
-        ...     model_id="perceptron_abc12345",
-        ...     X_test=[[0.5, 0.5], [1.0, 1.0]],
-        ...     y_true=[0, 1]  # Optional: for metrics
-        ... )
-        >>> print(result['predictions'])  # [0, 1]
-        >>> print(result['metrics']['accuracy'])  # 1.0
+            - status: "success" or "error"
+            - message: Status message
+            - predictions: Predicted class labels (0 or 1)
+            - n_samples: Number of samples predicted
+            - metrics: Classification metrics (only if y_true provided)
     """
     try:
         # Retrieve model

@@ -359,45 +359,24 @@ class MLP:
 
 
 class TrainMLPInput(BaseModel):
-    X_train: List[List[float]] = Field(
-        description="Training feature matrix as a 2D list of shape (n_samples, n_features)",
-    )
-    y_train: List[List[float]] = Field(
-        description="One-hot encoded labels as a 2D list of shape (n_samples, n_classes). Example: [[1,0,0], [0,1,0], [0,0,1]] for 3 classes",
-    )
-    hidden_layers: List[int] = Field(
-        default=[64, 32],
-        description="Number of neurons in each hidden layer. Example: [128, 64, 32] creates 3 hidden layers",
-    )
-    activation: Literal["relu", "sigmoid", "tanh"] = Field(
-        default="relu",
-        description="Activation function: 'relu' (recommended), 'sigmoid', or 'tanh'",
-    )
-    learning_rate: float = Field(
-        default=0.001,
-        ge=0.0001,
-        le=0.01,
-        description="Learning rate for optimizer. Lower values give more stable training",
-    )
-    max_epochs: int = Field(
-        default=500,
-        ge=100,
-        le=2000,
-        description="Maximum number of training epochs",
-    )
-    batch_size: int = Field(
-        default=32,
-        ge=16,
-        le=128,
-        description="Mini-batch size. Larger batches are more stable but slower per epoch",
-    )
-    optimizer: Literal["adam", "sgd", "rmsprop"] = Field(
-        default="adam",
-        description="Optimization algorithm: 'adam' (recommended), 'sgd', or 'rmsprop'",
-    )
+    X_train: List[List[float]] = Field(description="Training feature matrix as a 2D list of shape (n_samples, n_features)")
+    y_train: List[List[float]] = Field(description="One-hot encoded labels as a 2D list of shape (n_samples, n_classes). Example: [[1,0,0], [0,1,0], [0,0,1]] for 3 classes")
+    hidden_layers: List[int] = Field(default=[64, 32], description="Number of neurons in each hidden layer. Example: [128, 64, 32] creates 3 hidden layers")
+    activation: Literal["relu", "sigmoid", "tanh"] = Field(default="relu", description="Activation function: 'relu' (recommended), 'sigmoid', or 'tanh'")
+    learning_rate: float = Field(default=0.001, ge=0.0001, le=0.01, description="Learning rate for optimizer. Lower values give more stable training")
+    max_epochs: int = Field(default=500, ge=100, le=2000, description="Maximum number of training epochs")
+    batch_size: int = Field(default=32, ge=16, le=128, description="Mini-batch size. Larger batches are more stable but slower per epoch")
+    optimizer: Literal["adam", "sgd", "rmsprop"] = Field(default="adam", description="Optimization algorithm: 'adam' (recommended), 'sgd', or 'rmsprop'")
 
 
-@tool
+class InferenceMLPInput(BaseModel):
+    model_id: str = Field(description="The unique model ID returned from train_mlp_tool")
+    X_test: List[List[float]] = Field(description="Test feature matrix as a 2D list of shape (n_samples, n_features)")
+    return_probabilities: bool = Field(default=False, description="If True, return class probabilities instead of class indices")
+    y_true: Optional[List[int]] = Field(default=None, description="Optional ground truth class indices for computing metrics")
+
+
+@tool(args_schema=TrainMLPInput)
 def train_mlp_tool(
     X_train: List[List[float]],
     y_train: List[List[float]],
@@ -450,27 +429,15 @@ def train_mlp_tool(
     
     Returns:
         Dict containing:
-            - model_id (str): Unique identifier for the trained model
-            - status (str): "success" or "error"
-            - message (str): Status message
-            - n_features (int): Number of input features
-            - n_classes (int): Number of output classes
-            - n_samples (int): Number of training samples
-            - architecture (List[int]): Network architecture [input, hidden..., output]
-            - final_loss (float): Training loss at the end
-            - training_history (List[float]): Loss values per epoch
-    
-    Example:
-        >>> # Train on Iris-like data (4 features, 3 classes)
-        >>> result = train_mlp_tool(
-        ...     X_train=[[5.1, 3.5, 1.4, 0.2], [7.0, 3.2, 4.7, 1.4], ...],
-        ...     y_train=[[1, 0, 0], [0, 1, 0], ...],
-        ...     hidden_layers=[64, 32],
-        ...     activation="relu",
-        ...     optimizer="adam",
-        ...     max_epochs=500
-        ... )
-        >>> print(result['model_id'])  # Use this ID for inference
+            - model_id: Unique identifier for the trained model
+            - status: "success" or "error"
+            - message: Status message
+            - n_features: Number of input features
+            - n_classes: Number of output classes
+            - n_samples: Number of training samples
+            - architecture: Network architecture [input, hidden..., output]
+            - final_loss: Training loss at the end
+            - training_history: Loss values per epoch
     """
     try:
         X = np.array(X_train)
@@ -519,12 +486,12 @@ def train_mlp_tool(
         return {"status": "error", "message": str(e)}
 
 
-@tool
+@tool(args_schema=InferenceMLPInput)
 def inference_mlp_tool(
-    model_id: str = Field(description="The unique model ID returned from train_mlp_tool"),
-    X_test: List[List[float]] = Field(description="Test feature matrix as a 2D list of shape (n_samples, n_features)"),
-    return_probabilities: bool = Field(default=False, description="If True, return class probabilities instead of class indices"),
-    y_true: Optional[List[int]] = Field(default=None, description="Optional ground truth class indices for computing metrics")
+    model_id: str,
+    X_test: List[List[float]],
+    return_probabilities: bool = False,
+    y_true: Optional[List[int]] = None
 ) -> Dict[str, Any]:
     """
     Make predictions using a trained MLP model.
@@ -556,22 +523,12 @@ def inference_mlp_tool(
     
     Returns:
         Dict containing:
-            - status (str): "success" or "error"
-            - message (str): Status message
-            - predictions (List[int] or List[List[float]]): Predicted classes
+            - status: "success" or "error"
+            - message: Status message
+            - predictions: Predicted classes
               or probabilities
-            - n_samples (int): Number of samples predicted
-            - metrics (Dict): Classification metrics (only if y_true provided)
-    
-    Example:
-        >>> result = inference_mlp_tool(
-        ...     model_id="mlp_abc12345",
-        ...     X_test=[[5.0, 3.4, 1.5, 0.2]],
-        ...     return_probabilities=False,
-        ...     y_true=[0]  # Optional: for metrics
-        ... )
-        >>> print(result['predictions'])  # [0]
-        >>> print(result['metrics']['accuracy'])  # 1.0
+            - n_samples: Number of samples predicted
+            - metrics: Classification metrics (only if y_true provided)
     """
     try:
         if model_id not in MODEL_STORE:

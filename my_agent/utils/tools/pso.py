@@ -1,6 +1,6 @@
 import numpy as np
 from typing import List, Optional, Any, Dict, Tuple, Callable
-from pydantic import Field
+from pydantic import Field, BaseModel
 from langchain_core.tools import tool
 
 
@@ -234,8 +234,7 @@ BENCHMARK_FUNCTIONS = {
 }
 
 
-@tool
-def pso_tool(
+class PSOInput(BaseModel):
     function_name: str = Field(default="rastrigin", description="Benchmark function to optimize: 'rastrigin', 'ackley', 'rosenbrock', or 'sphere'"),
     dimensions: int = Field(default=10, ge=2, le=50, description="Number of dimensions for the optimization problem"),
     n_particles: int = Field(default=50, ge=20, le=200, description="Number of particles in the swarm"),
@@ -246,6 +245,20 @@ def pso_tool(
     w_decay: bool = Field(default=True, description="Whether to linearly decrease inertia weight over iterations"),
     velocity_clamp: float = Field(default=0.5, ge=0.1, le=1.0, description="Velocity clamping as fraction of search range"),
     custom_bounds: Optional[List[List[float]]] = Field(default=None, description="Custom bounds as list of [min, max] for each dimension. If None, uses function defaults")
+
+
+@tool(args_schema=PSOInput)
+def pso_tool(
+    function_name: str = "rastrigin",
+    dimensions: int = 10,
+    n_particles: int = 50,
+    max_iterations: int = 500,
+    w: float = 0.7,
+    c1: float = 1.5,
+    c2: float = 1.5,
+    w_decay: bool = True,
+    velocity_clamp: float = 0.5,
+    custom_bounds: Optional[List[List[float]]] = None,
 ) -> Dict[str, Any]:
     """
     Solve continuous optimization problems using Particle Swarm Optimization.
@@ -254,27 +267,7 @@ def pso_tool(
     Each particle is influenced by its personal best position and the
     swarm's global best position.
     
-    **When to use:**
-    - Continuous function optimization
-    - Multimodal problems (many local minima)
-    - Neural network training
-    - Parameter tuning
-    - Engineering design optimization
-    
-    **Benchmark functions available:**
-    - rastrigin: Highly multimodal, tests global search ability
-    - ackley: Large flat region with deep hole at center
-    - rosenbrock: Narrow curved valley, tests convergence
-    - sphere: Simple unimodal, baseline comparison
-    
-    **How PSO works:**
-    1. Initialize particles at random positions with random velocities
-    2. Evaluate fitness of each particle
-    3. Update personal best if current position is better
-    4. Update global best if any particle found better solution
-    5. Update velocities based on inertia + cognitive + social components
-    6. Move particles to new positions
-    7. Repeat until convergence or max iterations
+    Use for: Continuous function optimization, Multimodal problems (many local minima), Engineering design optimization
     
     **Parameter tuning:**
     - w (inertia): Higher = more exploration, lower = more exploitation
@@ -283,38 +276,15 @@ def pso_tool(
     - w_decay: Usually helps convergence by reducing exploration over time
     - velocity_clamp: Prevents particles from moving too fast
     
-    Args:
-        function_name: Benchmark function to optimize. Default: "rastrigin".
-        dimensions: Problem dimensionality (2-50). Default: 10.
-        n_particles: Swarm size (20-200). Default: 50.
-        max_iterations: Max iterations (100-2000). Default: 500.
-        w: Inertia weight (0.4-0.9). Default: 0.7.
-        c1: Cognitive coefficient (1.0-2.5). Default: 1.5.
-        c2: Social coefficient (1.0-2.5). Default: 1.5.
-        w_decay: Decay inertia weight. Default: True.
-        velocity_clamp: Velocity limit (0.1-1.0). Default: 0.5.
-        custom_bounds: Optional custom search bounds.
-    
     Returns:
         Dict containing:
-            - status (str): "success" or "error"
-            - best_position (List[float]): Best solution found
-            - best_fitness (float): Fitness value at best position
-            - known_optimal (float): Known global minimum value
-            - gap (float): Difference from known optimal
-            - dimensions (int): Problem dimensions
-            - convergence_history (List[float]): Best fitness per iteration
-    
-    Example:
-        >>> # Optimize 20-dimensional Rastrigin function
-        >>> result = pso_tool(
-        ...     function_name="rastrigin",
-        ...     dimensions=20,
-        ...     n_particles=100,
-        ...     max_iterations=1000
-        ... )
-        >>> print(f"Found minimum: {result['best_fitness']:.6f}")
-        >>> print(f"Gap from optimal: {result['gap']:.6f}")
+            - status: "success" or "error"
+            - best_position: Best solution found
+            - best_fitness: Fitness value at best position
+            - known_optimal: Known global minimum value
+            - gap: Difference from known optimal
+            - dimensions: Problem dimensions
+            - convergence_history: Best fitness per iteration
     """
     try:
         if function_name not in BENCHMARK_FUNCTIONS:

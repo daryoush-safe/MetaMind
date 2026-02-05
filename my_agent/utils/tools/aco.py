@@ -1,6 +1,6 @@
 import numpy as np
 from typing import List, Optional, Any, Dict, Tuple
-from pydantic import Field
+from pydantic import Field, BaseModel
 from langchain_core.tools import tool
 
 
@@ -225,18 +225,31 @@ class AntColonyOptimization:
         return best_path
 
 
-@tool
-def aco_tool(
-    distance_matrix: List[List[float]] = Field(description="Distance/cost matrix as a 2D list. For TSP, distance_matrix[i][j] is the distance from city i to city j"),
-    n_ants: int = Field(default=50, ge=10, le=100, description="Number of ants in the colony"),
-    max_iterations: int = Field(default=500, ge=100, le=2000, description="Maximum number of iterations"),
-    alpha: float = Field(default=1.0, ge=0.5, le=2.0, description="Pheromone importance - higher values make ants follow pheromone trails more strongly"),
-    beta: float = Field(default=2.0, ge=1.0, le=5.0, description="Heuristic importance - higher values make ants prefer shorter edges"),
-    evaporation_rate: float = Field(default=0.5, ge=0.1, le=0.9, description="Pheromone evaporation rate - higher values mean faster forgetting of old trails"),
-    q: float = Field(default=1.0, ge=0.1, le=10.0, description="Pheromone deposit factor - amount of pheromone deposited"),
-    initial_pheromone: float = Field(default=0.1, ge=0.01, le=1.0, description="Initial pheromone level on all edges"),
-    local_search: bool = Field(default=True, description="Apply 2-opt local search improvement to each ant's tour"),
+class TrainACOInput(BaseModel):
+    distance_matrix: List[List[float]] = Field(description="Distance/cost matrix as a 2D list. For TSP, distance_matrix[i][j] is the distance from city i to city j")
+    n_ants: int = Field(default=50, ge=10, le=100, description="Number of ants in the colony")
+    max_iterations: int = Field(default=500, ge=100, le=2000, description="Maximum number of iterations")
+    alpha: float = Field(default=1.0, ge=0.5, le=2.0, description="Pheromone importance - higher values make ants follow pheromone trails more strongly")
+    beta: float = Field(default=2.0, ge=1.0, le=5.0, description="Heuristic importance - higher values make ants prefer shorter edges")
+    evaporation_rate: float = Field(default=0.5, ge=0.1, le=0.9, description="Pheromone evaporation rate - higher values mean faster forgetting of old trails")
+    q: float = Field(default=1.0, ge=0.1, le=10.0, description="Pheromone deposit factor - amount of pheromone deposited")
+    initial_pheromone: float = Field(default=0.1, ge=0.01, le=1.0, description="Initial pheromone level on all edges")
+    local_search: bool = Field(default=True, description="Apply 2-opt local search improvement to each ant's tour")
     known_optimal: Optional[float] = Field(default=None, description="Known optimal tour length for computing optimality gap")
+
+
+@tool(args_schema=TrainACOInput)
+def aco_tool(
+    distance_matrix: List[List[float]],
+    n_ants: int = 50,
+    max_iterations: int = 500,
+    alpha: float = 1.0,
+    beta: float = 2.0,
+    evaporation_rate: float = 0.5,
+    q: float = 1.0,
+    initial_pheromone: float = 0.1,
+    local_search: bool = True,
+    known_optimal: Optional[float] = None
 ) -> Dict[str, Any]:
     """
     Solve the Traveling Salesman Problem using Ant Colony Optimization.
@@ -245,21 +258,7 @@ def aco_tool(
     pheromone trails (historical success) and heuristic information
     (edge distances). It's naturally suited for graph-based routing problems.
     
-    **When to use:**
-    - Traveling Salesman Problem (TSP)
-    - Vehicle routing problems
-    - Network routing
-    - Any problem that can be modeled as finding paths in a graph
-    
-    **How ACO works:**
-    1. Initialize pheromone trails on all edges
-    2. Each ant constructs a complete tour:
-       - At each step, choose next city probabilistically
-       - Probability depends on pheromone (τ^α) and distance (η^β)
-    3. After all ants finish, update pheromones:
-       - Evaporate existing pheromone: τ = (1-ρ)τ
-       - Deposit new pheromone on good paths: τ += Q/tour_length
-    4. Repeat until convergence or max iterations
+    Use for: TSP, vehicle routing, network routing, graph path problems.
     
     **Parameter tuning:**
     - alpha (pheromone importance): Higher = ants follow trails more
@@ -267,46 +266,14 @@ def aco_tool(
     - evaporation_rate: Higher = faster adaptation, lower = more exploitation
     - Typical good values: alpha=1, beta=2-5, evaporation=0.5
     
-    **2-opt local search:**
-    - Improves each ant's tour by reversing segments
-    - Significantly improves solution quality
-    - Recommended to keep enabled (default)
-    
-    Args:
-        distance_matrix: N×N matrix where element [i][j] is distance from i to j.
-        n_ants: Number of ants (10-100). Default: 50.
-        max_iterations: Max iterations (100-2000). Default: 500.
-        alpha: Pheromone importance (0.5-2.0). Default: 1.0.
-        beta: Heuristic importance (1.0-5.0). Default: 2.0.
-        evaporation_rate: Evaporation rate (0.1-0.9). Default: 0.5.
-        q: Pheromone deposit factor (0.1-10.0). Default: 1.0.
-        initial_pheromone: Initial pheromone (0.01-1.0). Default: 0.1.
-        local_search: Apply 2-opt. Default: True.
-    
     Returns:
         Dict containing:
-            - status (str): "success" or "error"
-            - best_tour (List[int]): Best route found (city indices)
-            - best_fitness (float): Tour length of best solution
-            - n_cities (int): Number of cities
-            - convergence_history (List[float]): Best fitness per iteration
-            - metrics (Dict[str, Any]): When known_optimal is provided
-                - Optimality gap: Difference from known optimal
-                - Gap percentage: (solution - optimal) / optimal * 100
-                - Performance rating: excellent/good/acceptable/poor
-    
-    Example:
-        >>> # Solve 10-city TSP
-        >>> distances = generate_distance_matrix(10)  # Your distance matrix
-        >>> result = aco_tool(
-        ...     distance_matrix=distances,
-        ...     n_ants=30,
-        ...     max_iterations=500,
-        ...     beta=3.0,  # Emphasize short edges
-        ...     local_search=True
-        ... )
-        >>> print(f"Best tour: {result['best_tour']}")
-        >>> print(f"Tour length: {result['best_fitness']}")
+            - status: "success" or "error"
+            - best_tour: Best route found (city indices)
+            - best_fitness: Tour length of best solution
+            - n_cities: Number of cities
+            - convergence_history: Best fitness per iteration
+            - metrics: When known_optimal is provided
     """
     try:
         dist_matrix = np.array(distance_matrix)

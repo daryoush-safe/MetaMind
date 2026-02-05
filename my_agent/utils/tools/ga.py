@@ -1,6 +1,6 @@
 import numpy as np
 from typing import List, Optional, Any, Dict, Literal, Callable, Tuple
-from pydantic import Field
+from pydantic import Field, BaseModel
 from langchain_core.tools import tool
 
 
@@ -249,7 +249,20 @@ def _calculate_tour_length(tour: np.ndarray, distance_matrix: np.ndarray) -> flo
     return total
 
 
-@tool
+class GAInput(BaseModel):
+    distance_matrix: List[List[float]] = Field(description="Distance/cost matrix as a 2D list")
+    population_size: int = Field(default=100, ge=50, le=500, description="Number of individuals in the population")
+    generations: int = Field(default=500, ge=100, le=2000, description="Number of evolutionary generations")
+    crossover_rate: float = Field(default=0.8, ge=0.6, le=0.95, description="Probability of crossover")
+    mutation_rate: float = Field(default=0.1, ge=0.01, le=0.3, description="Probability of mutation")
+    selection: Literal["tournament", "roulette", "rank"] = Field(default="tournament", description="Selection method")
+    tournament_size: int = Field(default=3, ge=2, le=10, description="Tournament size")
+    elitism: int = Field(default=2, ge=0, le=10, description="Number of best individuals to preserve")
+    crossover_type: Literal["pmx", "ox", "cx", "single", "two_point", "uniform"] = Field(default="pmx", description="Crossover operator type")
+    known_optimal: Optional[float] = Field(default=None, description="Known optimal tour length for computing optimality gap")
+
+
+@tool(args_schema=GAInput)
 def ga_tool(
     distance_matrix: List[List[float]] = Field(description="Distance/cost matrix as a 2D list"),
     population_size: int = Field(default=100, ge=50, le=500, description="Number of individuals in the population"),
@@ -269,20 +282,7 @@ def ga_tool(
     and mutation. This implementation is optimized for permutation-based problems
     like the Traveling Salesman Problem (TSP).
     
-    **When to use:**
-    - Traveling Salesman Problem (TSP)
-    - Vehicle routing problems
-    - Job shop scheduling
-    - Assignment problems
-    - Any problem where solutions are permutations
-    
-    **How GA works:**
-    1. Initialize random population of permutations
-    2. Evaluate fitness of each individual
-    3. Select parents based on fitness
-    4. Apply crossover to create offspring
-    5. Apply mutation for diversity
-    6. Repeat for specified generations
+    Use for: TSP, Vehicle routing problems, scheduling, Assignment problems, Any problem where solutions are permutations
     
     **Selection methods:**
     - tournament: Select best from random subset (recommended)
@@ -300,41 +300,13 @@ def ga_tool(
     - mutation_rate: 0.05-0.2 typical, too high = random search
     - elitism: 1-5 preserves good solutions
     
-    Args:
-        distance_matrix: N×N matrix where element [i][j] is distance from i to j.
-        population_size: Population size (50-500). Default: 100.
-        generations: Number of generations (100-2000). Default: 500.
-        crossover_rate: Crossover probability (0.6-0.95). Default: 0.8.
-        mutation_rate: Mutation probability (0.01-0.3). Default: 0.1.
-        selection: Selection method. Default: "tournament".
-        tournament_size: Tournament size (2-10). Default: 3.
-        elitism: Elite individuals (0-10). Default: 2.
-        crossover_type: Crossover operator. Default: "pmx".
-    
     Returns:
         Dict containing:
-            - status (str): "success" or "error"
-            - best_tour (List[int]): Best route found (city indices)
-            - best_fitness (float): Tour length of best solution
-            - n_cities (int): Number of cities
-            - convergence_history (List[float]): Best fitness per generation
-    
-    Example:
-        >>> # Solve 5-city TSP
-        >>> distances = [
-        ...     [0, 10, 15, 20, 25],
-        ...     [10, 0, 35, 25, 30],
-        ...     [15, 35, 0, 30, 20],
-        ...     [20, 25, 30, 0, 15],
-        ...     [25, 30, 20, 15, 0]
-        ... ]
-        >>> result = ga_tool(
-        ...     distance_matrix=distances,
-        ...     population_size=100,
-        ...     generations=500
-        ... )
-        >>> print(f"Best tour: {result['best_tour']}")
-        >>> print(f"Tour length: {result['best_fitness']}")
+            - status: "success" or "error"
+            - best_tour: Best route found (city indices)
+            - best_fitness: Tour length of best solution
+            - n_cities: Number of cities
+            - convergence_history: Best fitness per generation
     """
     try:
         dist_matrix = np.array(distance_matrix)

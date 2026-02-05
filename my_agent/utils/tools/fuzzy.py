@@ -1,7 +1,7 @@
 import numpy as np
 import uuid
 from typing import List, Optional, Any, Dict, Literal, Tuple
-from pydantic import Field
+from pydantic import Field, BaseModel
 from langchain_core.tools import tool
 
 # In-memory model storage
@@ -194,16 +194,31 @@ class FuzzyController:
                 predictions.append(np.sum(y_points * agg_output) / np.sum(agg_output))
         
         return np.array(predictions)
+    
+
+class TrainFuzzyInput(BaseModel):
+    X_train: List[List[float]] = Field(description="Training input features as a 2D list (n_samples, n_features)")
+    y_train: List[float] = Field(description="Training output values as a 1D list (n_samples,)")
+    n_membership_functions: Literal[3, 5, 7] = Field(default=3, description="Number of fuzzy sets per variable")
+    membership_type: Literal["triangular", "gaussian", "trapezoidal"] = Field(default="triangular")
+    defuzzification: Literal["centroid", "bisector", "mom", "som", "lom"] = Field(default="centroid")
+    rule_generation: Literal["wang_mendel", "manual"] = Field(default="wang_mendel")
 
 
-@tool
+class InferenceFuzzyInput(BaseModel):
+    model_id: str = Field(description="Model ID from train_fuzzy_tool")
+    X_test: List[List[float]] = Field(description="Test input features")
+    y_true: Optional[List[float]] = Field(default=None)
+
+
+@tool(args_schema=TrainFuzzyInput)
 def train_fuzzy_tool(
-    X_train: List[List[float]] = Field(description="Training input features as a 2D list of shape (n_samples, n_features)"),
-    y_train: List[float] = Field(description="Training output values as a 1D list of shape (n_samples,)"),
-    n_membership_functions: Literal[3, 5, 7] = Field(default=3, description="Number of fuzzy sets per variable (3=Low/Med/High, 5 or 7 for finer granularity)"),
-    membership_type: Literal["triangular", "gaussian", "trapezoidal"] = Field(default="triangular", description="Shape of membership functions"),
-    defuzzification: Literal["centroid", "bisector", "mom", "som", "lom"] = Field(default="centroid", description="Method to convert fuzzy output to crisp value"),
-    rule_generation: Literal["wang_mendel", "manual"] = Field(default="wang_mendel", description="Rule generation method")
+    X_train: List[List[float]],
+    y_train: List[float],
+    n_membership_functions: Literal[3, 5, 7] = 3,
+    membership_type: Literal["triangular", "gaussian", "trapezoidal"] = "triangular",
+    defuzzification: Literal["centroid", "bisector", "mom", "som", "lom"] = "centroid",
+    rule_generation: Literal["wang_mendel", "manual"] = "wang_mendel",
 ) -> Dict[str, Any]:
     """
     Train a Fuzzy Logic Controller for regression/control tasks.
@@ -212,11 +227,7 @@ def train_fuzzy_tool(
     complex relationships. They're particularly useful when interpretability
     is important and the system has inherent vagueness or imprecision.
     
-    **When to use:**
-    - Control systems (temperature, motor speed, robot navigation)
-    - Decision support systems requiring interpretable rules
-    - Modeling expert knowledge
-    - Regression with non-linear relationships
+    Use Fuzzy System for: Control systems, Decision support systems requiring interpretable rules, Modeling expert knowledge, Regression with non-linear relationships
     
     **Membership functions:**
     - n_mf=3: "Low", "Medium", "High" - coarse granularity
@@ -228,27 +239,12 @@ def train_fuzzy_tool(
     - gaussian: Smooth transitions, natural for sensor data
     - trapezoidal: Robust to noise, has "plateau" region
     
-    Args:
-        X_train: Input features as a 2D list (n_samples, n_features).
-        y_train: Output values as a 1D list (n_samples,).
-        n_membership_functions: Fuzzy sets per variable (3, 5, or 7). Default: 3.
-        membership_type: MF shape. Default: "triangular".
-        defuzzification: Output method. Default: "centroid".
-        rule_generation: Rule learning method. Default: "wang_mendel".
-    
     Returns:
         Dict containing:
-            - model_id (str): Unique identifier for the trained controller
-            - status (str): "success" or "error"
-            - n_rules (int): Number of learned rules
-            - output_range (Tuple[float, float]): Min/max output values
-    
-    Example:
-        >>> result = train_fuzzy_tool(
-        ...     X_train=[[20, 30], [25, 35], [30, 40]],
-        ...     y_train=[50, 60, 70],
-        ...     n_membership_functions=5
-        ... )
+            - model_id: Unique identifier for the trained controller
+            - status: "success" or "error"
+            - n_rules: Number of learned rules
+            - output_range: Min/max output values
     """
     try:
         X = np.array(X_train)
@@ -292,11 +288,11 @@ def train_fuzzy_tool(
         return {"status": "error", "message": str(e)}
 
 
-@tool
+@tool(args_schema=InferenceFuzzyInput)
 def inference_fuzzy_tool(
-    model_id: str = Field(description="The unique model ID returned from train_fuzzy_tool"),
-    X_test: List[List[float]] = Field(description="Test input features as a 2D list of shape (n_samples, n_features)"),
-    y_true: Optional[List[float]] = Field(default=None, description="Optional ground truth values for computing regression metrics")
+    model_id: str,
+    X_test: List[List[float]],
+    y_true: Optional[List[float]] = None,
 ) -> Dict[str, Any]:
     """
     Make predictions using a trained Fuzzy Controller.
@@ -307,28 +303,12 @@ def inference_fuzzy_tool(
     3. Aggregate rule outputs
     4. Defuzzify to get crisp predictions
     
-    Args:
-        model_id: Unique identifier from train_fuzzy_tool.
-        X_test: Test inputs as a 2D list (n_samples, n_features).
-    
     Returns:
         Dict containing:
-            - status (str): "success" or "error"
-            - predictions (List[float]): Predicted output values
-            - n_samples (int): Number of samples predicted
-            - metrics (Dict[str, Any]) Metrics when y_true is provided:
-                - MSE: Mean Squared Error
-                - RMSE: Root Mean Squared Error
-                - MAE: Mean Absolute Error
-                - R²: Coefficient of determination
-                - MAPE: Mean Absolute Percentage Error
-    
-    Example:
-        >>> result = inference_fuzzy_tool(
-        ...     model_id="fuzzy_abc12345",
-        ...     X_test=[[22, 32], [28, 38]]
-        ... )
-        >>> print(result['predictions'])
+            - status: "success" or "error"
+            - predictions: Predicted output values
+            - n_samples: Number of samples predicted
+            - metrics: Metrics when y_true is provided:
     """
     try:
         if model_id not in MODEL_STORE:

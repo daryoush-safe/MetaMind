@@ -1,7 +1,7 @@
 import numpy as np
 import uuid
 from typing import List, Tuple, Optional, Any, Dict, Literal
-from pydantic import Field
+from pydantic import Field, BaseModel
 from langchain_core.tools import tool
 
 # In-memory model storage
@@ -312,15 +312,31 @@ class SOM:
         return errors / len(data)
 
 
-@tool
-def train_som_tool(
-    X_train: List[List[float]] = Field(description="Training data matrix as a 2D list of shape (n_samples, n_features)"),
-    map_size: Tuple[int, int] = Field(default=(10, 10), description="Grid dimensions as (rows, cols). Larger maps capture more detail"),
-    learning_rate_initial: float = Field(default=0.5, ge=0.1, le=1.0, description="Initial learning rate. Higher values mean faster initial adaptation"),
-    learning_rate_final: float = Field(default=0.01, ge=0.001, le=0.1, description="Final learning rate after decay"),
-    neighborhood_initial: float = Field(default=5.0, ge=1.0, le=20.0, description="Initial neighborhood radius in grid units"),
-    max_epochs: int = Field(default=1000, ge=500, le=5000, description="Number of training iterations"),
+class TrainSOMInput(BaseModel):
+    X_train: List[List[float]] = Field(description="Training data matrix as a 2D list of shape (n_samples, n_features)")
+    map_size: Tuple[int, int] = Field(default=(10, 10), description="Grid dimensions as (rows, cols). Larger maps capture more detail")
+    learning_rate_initial: float = Field(default=0.5, ge=0.1, le=1.0, description="Initial learning rate. Higher values mean faster initial adaptation")
+    learning_rate_final: float = Field(default=0.01, ge=0.001, le=0.1, description="Final learning rate after decay")
+    neighborhood_initial: float = Field(default=5.0, ge=1.0, le=20.0, description="Initial neighborhood radius in grid units")
+    max_epochs: int = Field(default=1000, ge=500, le=5000, description="Number of training iterations")
     topology: Literal["rectangular", "hexagonal"] = Field(default="rectangular", description="Grid topology: 'rectangular' or 'hexagonal'")
+
+
+class InferenceSOMInput(BaseModel):
+    model_id: str = Field(description="The unique model ID returned from train_som_tool"),
+    X_test: List[List[float]] = Field(description="Test data matrix as a 2D list of shape (n_samples, n_features)"),
+    y_true: Optional[List[int]] = Field(default=None, description="Optional ground truth cluster labels for computing external validation metrics")
+
+
+@tool(args_schema=TrainSOMInput)
+def train_som_tool(
+    X_train: List[List[float]],
+    map_size: Tuple[int, int] = (10, 10),
+    learning_rate_initial: float = 0.5,
+    learning_rate_final: float = 0.01,
+    neighborhood_initial: float = 5.0,
+    max_epochs: int = 1000,
+    topology: Literal["rectangular", "hexagonal"] = "rectangular"
 ) -> Dict[str, Any]:
     """
     Train a Kohonen Self-Organizing Map (SOM) for clustering and visualization.
@@ -351,15 +367,6 @@ def train_som_tool(
     - Use more epochs for larger maps
     - Start with larger neighborhood_initial for smoother organization
     
-    Args:
-        X_train: Training data as a 2D list (n_samples, n_features).
-        map_size: Grid dimensions (rows, cols). Default: (10, 10).
-        learning_rate_initial: Starting learning rate (0.1-1.0). Default: 0.5.
-        learning_rate_final: Final learning rate (0.001-0.1). Default: 0.01.
-        neighborhood_initial: Initial radius (1.0-20.0). Default: 5.0.
-        max_epochs: Training iterations (500-5000). Default: 1000.
-        topology: Grid topology. Default: "rectangular".
-    
     Returns:
         Dict containing:
             - model_id (str): Unique identifier for the trained model
@@ -370,16 +377,6 @@ def train_som_tool(
             - n_features (int): Number of input features
             - n_samples (int): Number of training samples
             - quantization_error (float): Average distance to BMUs
-    
-    Example:
-        >>> # Cluster customer data
-        >>> result = train_som_tool(
-        ...     X_train=customer_features,
-        ...     map_size=(15, 15),
-        ...     topology="hexagonal",
-        ...     max_epochs=2000
-        ... )
-        >>> print(f"Trained with quantization error: {result['quantization_error']:.4f}")
     """
     try:
         X = np.array(X_train)
@@ -423,9 +420,9 @@ def train_som_tool(
 
 @tool  
 def inference_som_tool(
-    model_id: str = Field(description="The unique model ID returned from train_som_tool"),
-    X_test: List[List[float]] = Field(description="Test data matrix as a 2D list of shape (n_samples, n_features)"),
-    y_true: Optional[List[int]] = Field(default=None, description="Optional ground truth cluster labels for computing external validation metrics")
+    model_id: str,
+    X_test: List[List[float]],
+    y_true: Optional[List[int]] = None,
 ) -> Dict[str, Any]:
     """
     Find Best Matching Units (clusters) for new samples using a trained SOM.
@@ -443,29 +440,14 @@ def inference_som_tool(
     1. Train a SOM using train_som_tool to get a model_id
     2. Use this tool to find cluster assignments for new data
     
-    Args:
-        model_id: Unique identifier from train_som_tool.
-        X_test: Test data as a 2D list (n_samples, n_features).
-    
     Returns:
         Dict containing:
-            - status (str): "success" or "error"
-            - message (str): Status message  
-            - bmu_indices (List[Tuple[int, int]]): BMU (row, col) for each sample
-            - distances (List[float]): Distance from each sample to its BMU
-            - n_samples (int): Number of samples processed
-            - metrics (Dict[str, Any]) Metrics when y_true is provided:
-                - Purity: How well clusters match true labels
-                - Davies-Bouldin Index: Cluster separation quality (lower is better)
-                - Intra/Inter cluster distances: Compactness and separation
-    
-    Example:
-        >>> result = inference_som_tool(
-        ...     model_id="som_abc12345",
-        ...     X_test=[[age, income, spending], ...]
-        ... )
-        >>> for i, (bmu, dist) in enumerate(zip(result['bmu_indices'], result['distances'])):
-        ...     print(f"Sample {i}: Cluster {bmu}, distance {dist:.3f}")
+            - status: "success" or "error"
+            - message: Status message  
+            - bmu_indices: BMU (row, col) for each sample
+            - distances: Distance from each sample to its BMU
+            - n_samples: Number of samples processed
+            - metrics: Metrics when y_true is provided
     """
     try:
         if model_id not in MODEL_STORE:
