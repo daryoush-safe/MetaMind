@@ -8,6 +8,72 @@ from langchain_core.tools import tool
 MODEL_STORE: Dict[str, Any] = {}
 
 
+def calculate_multiclass_metrics(y_true: np.ndarray, y_pred: np.ndarray, n_classes: int) -> Dict[str, Any]:
+    """
+    Calculate classification metrics for multi-class classification.
+    
+    Args:
+        y_true: Ground truth class indices
+        y_pred: Predicted class indices
+        n_classes: Number of classes
+    
+    Returns:
+        Dictionary with accuracy, per-class metrics, macro/micro averages
+    """
+    y_true = np.asarray(y_true).flatten()
+    y_pred = np.asarray(y_pred).flatten()
+    
+    # Overall accuracy
+    accuracy = np.mean(y_true == y_pred)
+    
+    # Per-class metrics
+    per_class = {}
+    precisions = []
+    recalls = []
+    f1s = []
+    
+    for c in range(n_classes):
+        tp = np.sum((y_true == c) & (y_pred == c))
+        fp = np.sum((y_true != c) & (y_pred == c))
+        fn = np.sum((y_true == c) & (y_pred != c))
+        
+        precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+        recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+        f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+        
+        per_class[f"class_{c}"] = {
+            "precision": float(precision),
+            "recall": float(recall),
+            "f1_score": float(f1),
+            "support": int(np.sum(y_true == c))
+        }
+        precisions.append(precision)
+        recalls.append(recall)
+        f1s.append(f1)
+    
+    # Macro averages (unweighted mean)
+    macro_precision = np.mean(precisions)
+    macro_recall = np.mean(recalls)
+    macro_f1 = np.mean(f1s)
+    
+    # Build confusion matrix
+    confusion_matrix = np.zeros((n_classes, n_classes), dtype=int)
+    for true_label, pred_label in zip(y_true, y_pred):
+        confusion_matrix[true_label, pred_label] += 1
+    
+    return {
+        "accuracy": float(accuracy),
+        "macro_precision": float(macro_precision),
+        "macro_recall": float(macro_recall),
+        "macro_f1": float(macro_f1),
+        "per_class_metrics": per_class,
+        "confusion_matrix": confusion_matrix.tolist(),
+        "total_samples": int(len(y_true)),
+        "correct_predictions": int(np.sum(y_true == y_pred)),
+        "incorrect_predictions": int(np.sum(y_true != y_pred))
+    }
+
+
 class MLP:
     """
     Multi-Layer Perceptron (MLP) neural network for classification.
@@ -292,7 +358,7 @@ class MLP:
         return self.forward(np.asarray(X))
 
 
-class TrainPerceptronInput(BaseModel):
+class TrainMLPInput(BaseModel):
     X_train: List[List[float]] = Field(
         description="Training feature matrix as a 2D list of shape (n_samples, n_features)",
     )
@@ -457,7 +523,8 @@ def train_mlp_tool(
 def inference_mlp_tool(
     model_id: str = Field(description="The unique model ID returned from train_mlp_tool"),
     X_test: List[List[float]] = Field(description="Test feature matrix as a 2D list of shape (n_samples, n_features)"),
-    return_probabilities: bool = Field(default=False, description="If True, return class probabilities instead of class indices")
+    return_probabilities: bool = Field(default=False, description="If True, return class probabilities instead of class indices"),
+    y_true: Optional[List[int]] = Field(default=None, description="Optional ground truth class indices for computing metrics")
 ) -> Dict[str, Any]:
     """
     Make predictions using a trained MLP model.
@@ -474,10 +541,18 @@ def inference_mlp_tool(
     - return_probabilities=False: Returns predicted class indices (0, 1, 2, ...)
     - return_probabilities=True: Returns probability distribution over classes
     
+    **Metrics (when y_true is provided):**
+    If ground truth labels are provided, computes:
+    - Accuracy: Overall correctness
+    - Macro Precision/Recall/F1: Averaged across classes
+    - Per-class metrics: Precision, recall, F1 for each class
+    - Confusion Matrix: NxN matrix of true vs predicted
+    
     Args:
         model_id: Unique identifier from train_mlp_tool.
         X_test: Test features as a 2D list (n_samples, n_features).
         return_probabilities: Whether to return probabilities. Default: False.
+        y_true: Optional ground truth class indices for computing metrics.
     
     Returns:
         Dict containing:
@@ -486,14 +561,17 @@ def inference_mlp_tool(
             - predictions (List[int] or List[List[float]]): Predicted classes
               or probabilities
             - n_samples (int): Number of samples predicted
+            - metrics (Dict): Classification metrics (only if y_true provided)
     
     Example:
         >>> result = inference_mlp_tool(
         ...     model_id="mlp_abc12345",
         ...     X_test=[[5.0, 3.4, 1.5, 0.2]],
-        ...     return_probabilities=True
+        ...     return_probabilities=False,
+        ...     y_true=[0]  # Optional: for metrics
         ... )
-        >>> print(result['predictions'])  # [[0.95, 0.03, 0.02]]
+        >>> print(result['predictions'])  # [0]
+        >>> print(result['metrics']['accuracy'])  # 1.0
     """
     try:
         if model_id not in MODEL_STORE:
@@ -515,12 +593,26 @@ def inference_mlp_tool(
         else:
             predictions = model.predict(X).tolist()
         
-        return {
+        result = {
             "status": "success",
             "message": f"Successfully predicted {len(predictions)} samples",
             "predictions": predictions,
             "n_samples": len(predictions)
         }
+        
+        # Calculate metrics if ground truth is provided
+        if y_true is not None and not return_probabilities:
+            y_true_arr = np.array(y_true)
+            y_pred_arr = np.array(predictions)
+            
+            if len(y_true_arr) != len(y_pred_arr):
+                return {"status": "error", "message": f"y_true length ({len(y_true_arr)}) must match X_test samples ({len(y_pred_arr)})"}
+            
+            metrics = calculate_multiclass_metrics(y_true_arr, y_pred_arr, model._n_classes)
+            result["metrics"] = metrics
+            result["message"] = f"Successfully predicted {len(predictions)} samples with {metrics['accuracy']*100:.1f}% accuracy"
+        
+        return result
         
     except Exception as e:
         return {"status": "error", "message": str(e)}

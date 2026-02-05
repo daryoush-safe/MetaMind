@@ -8,6 +8,102 @@ from langchain_core.tools import tool
 MODEL_STORE: Dict[str, Any] = {}
 
 
+def calculate_clustering_metrics(X: np.ndarray, labels: np.ndarray, 
+                                  y_true: Optional[np.ndarray] = None) -> Dict[str, Any]:
+    """
+    Calculate clustering quality metrics.
+    
+    Args:
+        X: Data points of shape (n_samples, n_features)
+        labels: Cluster assignments (can be tuple indices flattened to integers)
+        y_true: Optional ground truth labels for external validation
+    
+    Returns:
+        Dictionary with clustering metrics
+    """
+    unique_labels = np.unique(labels)
+    n_clusters = len(unique_labels)
+    n_samples = len(X)
+    
+    # Calculate cluster sizes
+    cluster_sizes = {int(label): int(np.sum(labels == label)) for label in unique_labels}
+    
+    # Calculate intra-cluster distances (compactness)
+    intra_distances = []
+    for label in unique_labels:
+        cluster_points = X[labels == label]
+        if len(cluster_points) > 1:
+            centroid = np.mean(cluster_points, axis=0)
+            distances = np.linalg.norm(cluster_points - centroid, axis=1)
+            intra_distances.append(np.mean(distances))
+    
+    avg_intra_distance = float(np.mean(intra_distances)) if intra_distances else 0.0
+    
+    # Calculate inter-cluster distances (separation)
+    centroids = []
+    for label in unique_labels:
+        cluster_points = X[labels == label]
+        centroids.append(np.mean(cluster_points, axis=0))
+    centroids = np.array(centroids)
+    
+    inter_distances = []
+    for i in range(len(centroids)):
+        for j in range(i + 1, len(centroids)):
+            inter_distances.append(np.linalg.norm(centroids[i] - centroids[j]))
+    
+    avg_inter_distance = float(np.mean(inter_distances)) if inter_distances else 0.0
+    
+    # Davies-Bouldin Index (lower is better)
+    db_index = 0.0
+    if n_clusters > 1:
+        for i, label_i in enumerate(unique_labels):
+            max_ratio = 0.0
+            cluster_i = X[labels == label_i]
+            si = np.mean(np.linalg.norm(cluster_i - centroids[i], axis=1)) if len(cluster_i) > 0 else 0
+            
+            for j, label_j in enumerate(unique_labels):
+                if i != j:
+                    cluster_j = X[labels == label_j]
+                    sj = np.mean(np.linalg.norm(cluster_j - centroids[j], axis=1)) if len(cluster_j) > 0 else 0
+                    dij = np.linalg.norm(centroids[i] - centroids[j])
+                    if dij > 0:
+                        ratio = (si + sj) / dij
+                        max_ratio = max(max_ratio, ratio)
+            db_index += max_ratio
+        db_index /= n_clusters
+    
+    result = {
+        "n_clusters": n_clusters,
+        "n_samples": n_samples,
+        "cluster_sizes": cluster_sizes,
+        "avg_intra_cluster_distance": avg_intra_distance,
+        "avg_inter_cluster_distance": avg_inter_distance,
+        "davies_bouldin_index": float(db_index),
+        "compactness_ratio": float(avg_intra_distance / avg_inter_distance) if avg_inter_distance > 0 else float('inf')
+    }
+    
+    # External validation metrics if ground truth is provided
+    if y_true is not None:
+        y_true = np.asarray(y_true).flatten()
+        
+        # Purity
+        total_correct = 0
+        for label in unique_labels:
+            cluster_mask = labels == label
+            if np.sum(cluster_mask) > 0:
+                cluster_true = y_true[cluster_mask]
+                most_common = np.bincount(cluster_true.astype(int)).argmax()
+                total_correct += np.sum(cluster_true == most_common)
+        purity = total_correct / n_samples
+        
+        result["purity"] = float(purity)
+        result["external_validation_available"] = True
+    else:
+        result["external_validation_available"] = False
+    
+    return result
+
+
 class SOM:
     """
     Kohonen Self-Organizing Map for clustering and visualization.
@@ -200,6 +296,20 @@ class SOM:
             total_error += np.linalg.norm(sample - self.weights[bmu_idx])
         
         return total_error / len(data)
+    
+    def topographic_error(self, data: np.ndarray) -> float:
+        if not self._is_fitted:
+            raise RuntimeError("Model must be fitted first.")
+        errors = 0
+        for sample in data:
+            flat_w = self.weights.reshape(-1, self.weights.shape[-1])
+            dists = np.linalg.norm(flat_w - sample, axis=1)
+            sorted_indices = np.argsort(dists)
+            bmu1 = np.unravel_index(sorted_indices[0], self.map_size)
+            bmu2 = np.unravel_index(sorted_indices[1], self.map_size)
+            if abs(bmu1[0] - bmu2[0]) + abs(bmu1[1] - bmu2[1]) > 1:
+                errors += 1
+        return errors / len(data)
 
 
 @tool
@@ -277,12 +387,8 @@ def train_som_tool(
         if len(X.shape) != 2:
             return {"status": "error", "message": "X_train must be a 2D array"}
         if X.shape[0] < map_size[0] * map_size[1]:
-            return {
-                "status": "error", 
-                "message": f"Not enough samples ({X.shape[0]}) for map size {map_size}"
-            }
+            return {"status": "error", "message": f"Not enough samples ({X.shape[0]}) for map size {map_size}"}
         
-        # Create and train model
         model = SOM(
             map_size=map_size,
             learning_rate_initial=learning_rate_initial,
@@ -293,12 +399,11 @@ def train_som_tool(
         )
         model.fit(X)
         
-        # Store model
         model_id = f"som_{uuid.uuid4().hex[:8]}"
         MODEL_STORE[model_id] = model
         
-        # Calculate quantization error
         q_error = model.quantization_error(X)
+        t_error = model.topographic_error(X)
         
         return {
             "status": "success",
@@ -309,9 +414,9 @@ def train_som_tool(
             "n_features": X.shape[1],
             "n_samples": X.shape[0],
             "topology": topology,
-            "quantization_error": float(q_error)
+            "quantization_error": float(q_error),
+            "topographic_error": float(t_error)
         }
-        
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
@@ -319,7 +424,8 @@ def train_som_tool(
 @tool  
 def inference_som_tool(
     model_id: str = Field(description="The unique model ID returned from train_som_tool"),
-    X_test: List[List[float]] = Field(description="Test data matrix as a 2D list of shape (n_samples, n_features)")
+    X_test: List[List[float]] = Field(description="Test data matrix as a 2D list of shape (n_samples, n_features)"),
+    y_true: Optional[List[int]] = Field(default=None, description="Optional ground truth cluster labels for computing external validation metrics")
 ) -> Dict[str, Any]:
     """
     Find Best Matching Units (clusters) for new samples using a trained SOM.
@@ -348,6 +454,10 @@ def inference_som_tool(
             - bmu_indices (List[Tuple[int, int]]): BMU (row, col) for each sample
             - distances (List[float]): Distance from each sample to its BMU
             - n_samples (int): Number of samples processed
+            - metrics (Dict[str, Any]) Metrics when y_true is provided:
+                - Purity: How well clusters match true labels
+                - Davies-Bouldin Index: Cluster separation quality (lower is better)
+                - Intra/Inter cluster distances: Compactness and separation
     
     Example:
         >>> result = inference_som_tool(
@@ -359,7 +469,7 @@ def inference_som_tool(
     """
     try:
         if model_id not in MODEL_STORE:
-            return {"status": "error", "message": f"Model '{model_id}' not found. Train a model first."}
+            return {"status": "error", "message": f"Model '{model_id}' not found."}
         
         model = MODEL_STORE[model_id]
         X = np.array(X_test)
@@ -367,26 +477,36 @@ def inference_som_tool(
         if len(X.shape) != 2:
             return {"status": "error", "message": "X_test must be a 2D array"}
         if X.shape[1] != model._n_features:
-            return {
-                "status": "error",
-                "message": f"X_test has {X.shape[1]} features but model expects {model._n_features}"
-            }
+            return {"status": "error", "message": f"X_test has {X.shape[1]} features but model expects {model._n_features}"}
         
         bmu_indices = []
         distances = []
+        cluster_labels = []
         
         for sample in X:
             bmu = model.get_bmu(sample)
             bmu_indices.append(tuple(map(int, bmu)))
             distances.append(float(np.linalg.norm(sample - model.weights[bmu])))
+            # Convert 2D BMU to single cluster label
+            cluster_labels.append(bmu[0] * model.map_size[1] + bmu[1])
         
-        return {
+        result = {
             "status": "success",
             "message": f"Found BMUs for {len(bmu_indices)} samples",
             "bmu_indices": bmu_indices,
             "distances": distances,
+            "cluster_labels": cluster_labels,
             "n_samples": len(bmu_indices)
         }
         
+        # Calculate metrics if ground truth is provided
+        if y_true is not None:
+            y_true_arr = np.array(y_true)
+            cluster_arr = np.array(cluster_labels)
+            metrics = calculate_clustering_metrics(X, cluster_arr, y_true_arr)
+            result["metrics"] = metrics
+            result["message"] = f"Found BMUs for {len(bmu_indices)} samples with purity {metrics['purity']*100:.1f}%"
+        
+        return result
     except Exception as e:
         return {"status": "error", "message": str(e)}

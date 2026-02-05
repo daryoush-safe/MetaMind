@@ -7,6 +7,57 @@ from langchain_core.tools import tool
 # In-memory model storage
 MODEL_STORE: Dict[str, Any] = {}
 
+def calculate_regression_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, Any]:
+    """
+    Calculate regression metrics.
+    
+    Args:
+        y_true: Ground truth values
+        y_pred: Predicted values
+    
+    Returns:
+        Dictionary with MSE, MAE, RMSE, R², MAPE
+    """
+    y_true = np.asarray(y_true).flatten()
+    y_pred = np.asarray(y_pred).flatten()
+    
+    n = len(y_true)
+    
+    # Mean Squared Error
+    mse = float(np.mean((y_true - y_pred) ** 2))
+    
+    # Root Mean Squared Error
+    rmse = float(np.sqrt(mse))
+    
+    # Mean Absolute Error
+    mae = float(np.mean(np.abs(y_true - y_pred)))
+    
+    # R² Score (coefficient of determination)
+    ss_res = np.sum((y_true - y_pred) ** 2)
+    ss_tot = np.sum((y_true - np.mean(y_true)) ** 2)
+    r2 = float(1 - (ss_res / ss_tot)) if ss_tot > 0 else 0.0
+    
+    # Mean Absolute Percentage Error (avoid division by zero)
+    mask = y_true != 0
+    if np.any(mask):
+        mape = float(np.mean(np.abs((y_true[mask] - y_pred[mask]) / y_true[mask])) * 100)
+    else:
+        mape = float('inf')
+    
+    # Max Error
+    max_error = float(np.max(np.abs(y_true - y_pred)))
+    
+    return {
+        "mse": mse,
+        "rmse": rmse,
+        "mae": mae,
+        "r2_score": r2,
+        "mape": mape,
+        "max_error": max_error,
+        "n_samples": n,
+        "explained_variance_ratio": r2
+    }
+
 
 class FuzzyController:
     """
@@ -221,6 +272,10 @@ def train_fuzzy_tool(
         model_id = f"fuzzy_{uuid.uuid4().hex[:8]}"
         MODEL_STORE[model_id] = model
         
+        # Calculate training metrics
+        train_pred = model.predict(X)
+        train_metrics = calculate_regression_metrics(y, train_pred)
+        
         return {
             "status": "success",
             "message": f"Fuzzy controller trained with {len(model.rules)} rules",
@@ -229,7 +284,9 @@ def train_fuzzy_tool(
             "n_samples": X.shape[0],
             "n_rules": len(model.rules),
             "n_membership_functions": n_membership_functions,
-            "output_range": model.var_ranges[-1] if model.var_ranges else None
+            "output_range": model.var_ranges[-1] if model.var_ranges else None,
+            "training_mse": train_metrics["mse"],
+            "training_r2": train_metrics["r2_score"]
         }
     except Exception as e:
         return {"status": "error", "message": str(e)}
@@ -238,7 +295,8 @@ def train_fuzzy_tool(
 @tool
 def inference_fuzzy_tool(
     model_id: str = Field(description="The unique model ID returned from train_fuzzy_tool"),
-    X_test: List[List[float]] = Field(description="Test input features as a 2D list of shape (n_samples, n_features)")
+    X_test: List[List[float]] = Field(description="Test input features as a 2D list of shape (n_samples, n_features)"),
+    y_true: Optional[List[float]] = Field(default=None, description="Optional ground truth values for computing regression metrics")
 ) -> Dict[str, Any]:
     """
     Make predictions using a trained Fuzzy Controller.
@@ -258,6 +316,12 @@ def inference_fuzzy_tool(
             - status (str): "success" or "error"
             - predictions (List[float]): Predicted output values
             - n_samples (int): Number of samples predicted
+            - metrics (Dict[str, Any]) Metrics when y_true is provided:
+                - MSE: Mean Squared Error
+                - RMSE: Root Mean Squared Error
+                - MAE: Mean Absolute Error
+                - R²: Coefficient of determination
+                - MAPE: Mean Absolute Percentage Error
     
     Example:
         >>> result = inference_fuzzy_tool(
@@ -280,11 +344,23 @@ def inference_fuzzy_tool(
         
         predictions = model.predict(X)
         
-        return {
+        result = {
             "status": "success",
             "message": f"Successfully predicted {len(predictions)} samples",
             "predictions": predictions.tolist(),
             "n_samples": len(predictions)
         }
+        
+        # Calculate metrics if ground truth is provided
+        if y_true is not None:
+            y_true_arr = np.array(y_true)
+            if len(y_true_arr) != len(predictions):
+                return {"status": "error", "message": f"y_true length must match X_test samples"}
+            
+            metrics = calculate_regression_metrics(y_true_arr, predictions)
+            result["metrics"] = metrics
+            result["message"] = f"Successfully predicted {len(predictions)} samples with R²={metrics['r2_score']:.3f}"
+        
+        return result
     except Exception as e:
         return {"status": "error", "message": str(e)}

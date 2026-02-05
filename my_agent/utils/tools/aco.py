@@ -4,6 +4,59 @@ from pydantic import Field
 from langchain_core.tools import tool
 
 
+def calculate_tsp_metrics(best_tour: List[int], best_fitness: float, 
+                          distance_matrix: np.ndarray,
+                          known_optimal: Optional[float] = None,
+                          convergence_history: Optional[List[float]] = None) -> Dict[str, Any]:
+    """Calculate TSP optimization metrics."""
+    n_cities = len(best_tour)
+    
+    metrics = {
+        "tour_length": float(best_fitness),
+        "n_cities": n_cities,
+        "avg_edge_length": float(best_fitness / n_cities),
+    }
+    
+    edge_lengths = []
+    for i in range(n_cities):
+        j = (i + 1) % n_cities
+        edge_lengths.append(distance_matrix[best_tour[i], best_tour[j]])
+    
+    metrics["min_edge"] = float(np.min(edge_lengths))
+    metrics["max_edge"] = float(np.max(edge_lengths))
+    metrics["edge_std"] = float(np.std(edge_lengths))
+    
+    if known_optimal is not None and known_optimal > 0:
+        gap = best_fitness - known_optimal
+        gap_percentage = (gap / known_optimal) * 100
+        metrics["known_optimal"] = float(known_optimal)
+        metrics["optimality_gap"] = float(gap)
+        metrics["optimality_gap_percentage"] = float(gap_percentage)
+        metrics["is_optimal"] = gap_percentage < 0.01
+        
+        if gap_percentage < 1:
+            metrics["performance_rating"] = "excellent"
+        elif gap_percentage < 5:
+            metrics["performance_rating"] = "good"
+        elif gap_percentage < 10:
+            metrics["performance_rating"] = "acceptable"
+        else:
+            metrics["performance_rating"] = "poor"
+    
+    if convergence_history and len(convergence_history) > 1:
+        metrics["initial_fitness"] = float(convergence_history[0])
+        metrics["improvement"] = float(convergence_history[0] - best_fitness)
+        metrics["improvement_percentage"] = float((convergence_history[0] - best_fitness) / convergence_history[0] * 100)
+        
+        last_10 = convergence_history[-10:] if len(convergence_history) >= 10 else convergence_history
+        if len(last_10) > 1:
+            variance = np.var(last_10)
+            metrics["convergence_variance"] = float(variance)
+            metrics["converged"] = variance < 1e-6
+    
+    return metrics
+
+
 class AntColonyOptimization:
     """
     Ant Colony Optimization for combinatorial optimization.
@@ -182,7 +235,8 @@ def aco_tool(
     evaporation_rate: float = Field(default=0.5, ge=0.1, le=0.9, description="Pheromone evaporation rate - higher values mean faster forgetting of old trails"),
     q: float = Field(default=1.0, ge=0.1, le=10.0, description="Pheromone deposit factor - amount of pheromone deposited"),
     initial_pheromone: float = Field(default=0.1, ge=0.01, le=1.0, description="Initial pheromone level on all edges"),
-    local_search: bool = Field(default=True, description="Apply 2-opt local search improvement to each ant's tour")
+    local_search: bool = Field(default=True, description="Apply 2-opt local search improvement to each ant's tour"),
+    known_optimal: Optional[float] = Field(default=None, description="Known optimal tour length for computing optimality gap")
 ) -> Dict[str, Any]:
     """
     Solve the Traveling Salesman Problem using Ant Colony Optimization.
@@ -236,6 +290,10 @@ def aco_tool(
             - best_fitness (float): Tour length of best solution
             - n_cities (int): Number of cities
             - convergence_history (List[float]): Best fitness per iteration
+            - metrics (Dict[str, Any]): When known_optimal is provided
+                - Optimality gap: Difference from known optimal
+                - Gap percentage: (solution - optimal) / optimal * 100
+                - Performance rating: excellent/good/acceptable/poor
     
     Example:
         >>> # Solve 10-city TSP
@@ -260,7 +318,6 @@ def aco_tool(
         
         n_cities = dist_matrix.shape[0]
         
-        # Run ACO
         aco = AntColonyOptimization(
             n_ants=n_ants,
             max_iterations=max_iterations,
@@ -274,7 +331,13 @@ def aco_tool(
         
         best_tour, best_fitness = aco.fit(dist_matrix)
         
-        return {
+        metrics = calculate_tsp_metrics(
+            best_tour, best_fitness, dist_matrix,
+            known_optimal=known_optimal,
+            convergence_history=aco._history
+        )
+        
+        result = {
             "status": "success",
             "message": f"ACO optimization completed for {n_cities}-city TSP",
             "best_tour": best_tour,
@@ -283,8 +346,14 @@ def aco_tool(
             "n_ants": n_ants,
             "iterations_run": max_iterations,
             "local_search_applied": local_search,
-            "convergence_history": aco._history[-20:]  # Last 20 iterations
+            "convergence_history": aco._history[-20:],
+            "metrics": metrics
         }
+        
+        if "performance_rating" in metrics:
+            result["message"] = f"ACO optimization completed. Tour length: {best_fitness:.2f}, Gap: {metrics['optimality_gap_percentage']:.2f}% ({metrics['performance_rating']})"
+        
+        return result
         
     except Exception as e:
         return {"status": "error", "message": str(e)}
