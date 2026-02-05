@@ -1,11 +1,30 @@
 import os
 import json
-from dotenv import load_dotenv
+import numpy as np
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 
 from .state import AgentState, Plan, PlanStep, ExecutionResult
 from .tools.tool_registry import ALL_TOOLS
+
+
+def convert_numpy_types(obj):
+    """Recursively convert numpy types to native Python types for serialization."""
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    elif isinstance(obj, (np.float64, np.float32, np.float16)):
+        return float(obj)
+    elif isinstance(obj, (np.int64, np.int32, np.int16, np.int8)):
+        return int(obj)
+    elif isinstance(obj, np.bool_):
+        return bool(obj)
+    elif isinstance(obj, dict):
+        return {key: convert_numpy_types(value) for key, value in obj.items()}
+    elif isinstance(obj, (list, tuple)):
+        converted = [convert_numpy_types(item) for item in obj]
+        return type(obj)(converted) if isinstance(obj, tuple) else converted
+    else:
+        return obj
 
 def get_llm(temperature: float = 0) -> ChatOpenAI:
     return ChatOpenAI(
@@ -30,14 +49,35 @@ Available CI Methods and their use cases:
 8. **PSO** (pso_tool): Continuous function optimization (Rastrigin, Ackley, Rosenbrock, Sphere)
 9. **ACO** (aco_tool): TSP, routing problems, graph-based optimization
 
-Problem Type to Method Mapping:
-- TSP/Routing → ACO (primary), GA (backup)
-- Continuous Optimization → PSO
-- Classification → MLP (complex), Perceptron (simple/binary)
-- Clustering → SOM
-- Pattern Recognition → Hopfield
-- Control/Regression → Fuzzy, GP
-- Symbolic Regression → GP
+CRITICAL: Tool Parameter Naming Conventions
+You MUST use these exact parameter names when specifying tool_args:
+
+Training Tools:
+- train_perceptron_tool: {"X_train": [[...]], "y_train": [...], "learning_rate": 0.01, "max_epochs": 100, "bias": true}
+- train_mlp_tool: {"X_train": [[...]], "y_train": [[...]], "hidden_layers": [64, 32], "activation": "relu", "learning_rate": 0.001, "max_epochs": 500, "batch_size": 32, "optimizer": "adam"}
+- train_som_tool: {"X_train": [[...]], "map_size": [10, 10], "learning_rate_initial": 0.5, "learning_rate_final": 0.01, "neighborhood_initial": 5.0, "max_epochs": 1000, "topology": "rectangular"}
+- train_hopfield_tool: {"patterns": [[-1, 1, ...]], "max_iterations": 100, "threshold": 0.0, "async_update": true, "energy_threshold": 1e-6}
+- train_fuzzy_tool: {"X_train": [[...]], "y_train": [...], "n_membership_functions": 3, "membership_type": "triangular", "defuzzification": "centroid", "rule_generation": "wang_mendel"}
+- train_gp_tool: {"X_train": [...], "y_train": [...], "population_size": 200, "generations": 50, "max_depth": 6, "crossover_rate": 0.9, "mutation_rate": 0.1, "function_set": ["+", "-", "*", "/"], "terminal_set": ["x", "constants"], "parsimony_coefficient": 0.001}
+
+Inference Tools:
+- inference_perceptron_tool: {"model_id": "perceptron_xxxxx", "X_test": [[...]]}
+- inference_mlp_tool: {"model_id": "mlp_xxxxx", "X_test": [[...]], "return_probabilities": false}
+- inference_som_tool: {"model_id": "som_xxxxx", "X_test": [[...]]}
+- inference_hopfield_tool: {"model_id": "hopfield_xxxxx", "pattern": [...]}
+- inference_fuzzy_tool: {"model_id": "fuzzy_xxxxx", "X_test": [[...]]}
+- inference_gp_tool: {"model_id": "gp_xxxxx", "X_test": [...]}
+
+Optimization Tools:
+- ga_tool: {"distance_matrix": [[...]], "population_size": 100, "generations": 500, "crossover_rate": 0.8, "mutation_rate": 0.1, "selection": "tournament", "tournament_size": 3, "elitism": 2, "crossover_type": "pmx"}
+- pso_tool: {"function_name": "rastrigin", "dimensions": 10, "n_particles": 50, "max_iterations": 500, "w": 0.7, "c1": 1.5, "c2": 1.5, "w_decay": true, "velocity_clamp": 0.5, "custom_bounds": null}
+- aco_tool: {"distance_matrix": [[...]], "n_ants": 50, "max_iterations": 500, "alpha": 1.0, "beta": 2.0, "evaporation_rate": 0.5, "q": 1.0, "initial_pheromone": 0.1, "local_search": true}
+
+Key Rules for Parameter Names:
+1. Training data: ALWAYS use "X_train" and "y_train" (NOT "X" and "y")
+2. Test data: ALWAYS use "X_test" (NOT "X")
+3. Model references: ALWAYS use "model_id" for inference steps
+4. Use exact parameter names as shown above - DO NOT abbreviate or rename
 
 When creating a plan, you must output a JSON object with this structure, If the input IS a CI problem:
 {
@@ -72,6 +112,7 @@ Important rules:
 2. Include data preprocessing steps if needed
 3. Include evaluation/analysis steps at the end
 4. Be specific about tool arguments based on problem requirements
+5. **ALWAYS use the exact parameter names specified above - this is critical for proper tool execution**
 """
 
 EXECUTOR_SYSTEM_PROMPT = """You are an AI executor that runs Computational Intelligence tools.
@@ -207,7 +248,6 @@ Remember to output a valid JSON plan.""")
 
 def execute_step(state: AgentState) -> AgentState:
     plan = state["plan"]
-    # Start from where we left off (usually 0)
     current_index = state["current_step_index"]
     past_steps = list(state.get("past_steps", []))
     new_model_store = dict(state.get("model_store", {}))
@@ -218,20 +258,29 @@ def execute_step(state: AgentState) -> AgentState:
 
     while current_index < len(plan.steps):
         step = plan.steps[current_index]
-        
         tool_to_use = next((t for t in ALL_TOOLS if t.name == step.tool_name), None)
         
         if tool_to_use:
             try:
-                # Inject model_id if this is an inference step
-                args = step.tool_args or {}
+                args = step.tool_args.copy() if step.tool_args else {}
+                
+                if step.tool_name.startswith("inference_"):
+                    method_key = step.tool_name.replace('inference_', '').replace('_tool', '')
+                    
+                    # If we have a model_id for this method in our store, inject it
+                    if method_key in new_model_store:
+                        args["model_id"] = new_model_store[method_key]
+                    else:
+                        print(f"WARNING: No model_id found in store for {method_key}")
 
                 result = tool_to_use.invoke(args)
+                result = convert_numpy_types(result)
                 step.status = "completed"
                 
                 if isinstance(result, dict) and 'model_id' in result:
                     method_key = step.tool_name.replace('train_', '').replace('_tool', '')
                     new_model_store[method_key] = result['model_id']
+                    
             except Exception as e:
                 result = {"status": "error", "message": str(e)}
                 step.status = "failed"
@@ -239,7 +288,7 @@ def execute_step(state: AgentState) -> AgentState:
             llm = get_llm(temperature=0.3)
             prompt = f"""You are executing a 'Reasoning Step' in a larger plan.
             Task: {step.description}
-            Context from previous steps: {state.get('past_steps', [])[-2:]}
+            Previous results context: {str(past_steps[-2:])[:1000]}
             
             Provide your analysis or output for this specific step only."""
             
@@ -248,7 +297,7 @@ def execute_step(state: AgentState) -> AgentState:
             step.status = "completed"
 
         past_steps.append((step, result))
-        new_messages.append(AIMessage(content=f"Executed {step.tool_name}: {str(result)[:200]}"))
+        new_messages.append(AIMessage(content=f"Executed {step.tool_name or 'LLM'}: {str(result)[:200]}"))
         current_index += 1
 
         if step.status == "failed":
@@ -259,7 +308,7 @@ def execute_step(state: AgentState) -> AgentState:
         "current_step_index": current_index,
         "model_store": new_model_store,
         "messages": new_messages,
-        "should_replan": True # Always check with replanner after the batch
+        "should_replan": True 
     }
 
 
@@ -305,10 +354,11 @@ Decide: continue, adjust, replan, or complete?"""
         HumanMessage(content=eval_prompt)
     ]
 
-    history = state["messages"][-10:-1]
-    response = replanner_llm.invoke(messages + history)
+    # history = state["messages"][-10:-1]
+    # response = replanner_llm.invoke(messages + history)
+    response = replanner_llm.invoke(messages)
     
-    # Parse decision
+    # TODO: we have some error here
     try:
         response_text = response.content
         if "```json" in response_text:
@@ -339,15 +389,18 @@ Decide: continue, adjust, replan, or complete?"""
         "iteration_count": state.get("iteration_count", 0) + 1
     }
 
-def should_continue(state: AgentState) -> bool:
+def should_continue(state: AgentState) -> str:
     """
     decide whether to continue execution or end.
     Returns True to continue (go back to agent), False to end.
     """
     if state.get("final_response"):
-        return False
+        return "end"
     
     if state.get("iteration_count", 0) >= 5:
-        return False
+        return "end"
 
-    return state.get("should_replan", False)
+    if state.get("should_replan", False):
+        return "continue"
+
+    return "end"

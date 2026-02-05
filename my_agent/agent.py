@@ -17,8 +17,8 @@ def build_graph() -> StateGraph:
         "replanner",
         should_continue,
         {
-            True: "agent",
-            False: END
+            "continue": "agent",
+            "end": END
         }
     )
     return graph
@@ -138,7 +138,7 @@ def run_interactive(app):
                         past_steps = node_output.get("past_steps", [])
                         if past_steps:
                             last_step, last_result = past_steps[-1]
-                            print(f"   Executed step {last_step.step_id}: {last_step.description[:50]}...")
+                            print(f"   Executed step {last_step.step_id}: {last_step.description}")
                             if isinstance(last_result, dict):
                                 status = last_result.get("status", "unknown")
                                 print(f"   Status: {status}")

@@ -142,11 +142,11 @@ class Perceptron:
 
 
 def train_perceptron_tool(
-    X_train: List[List[float]] = Field(description="Training feature matrix as a 2D list of shape (n_samples, n_features)"),
-    y_train: List[int] = Field(description="Training labels as a list of binary values (0 or 1)"),
-    learning_rate: float = Field(default=0.01, ge=0.001, le=0.1, description="Learning rate for weight updates. Higher values mean faster but potentially unstable learning."),
-    max_epochs: int = Field(default=100, ge=50, le=1000, description="Maximum number of training iterations over the dataset."),
-    bias: bool = Field(default=True, description="Whether to include a bias term in the model.")
+    X_train: List[List[float]],
+    y_train: List[int],
+    learning_rate: float = 0.01,
+    max_epochs: int = 100,
+    bias: bool = True
 ) -> Dict[str, Any]:
     """
     Train a Perceptron classifier on the provided dataset.

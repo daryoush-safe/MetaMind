@@ -1,7 +1,7 @@
 import numpy as np
 import uuid
 from typing import List, Optional, Any, Dict, Literal
-from pydantic import Field
+from pydantic import Field, BaseModel
 from langchain_core.tools import tool
 
 # In-memory model storage
@@ -292,16 +292,55 @@ class MLP:
         return self.forward(np.asarray(X))
 
 
+class TrainPerceptronInput(BaseModel):
+    X_train: List[List[float]] = Field(
+        description="Training feature matrix as a 2D list of shape (n_samples, n_features)",
+    )
+    y_train: List[List[float]] = Field(
+        description="One-hot encoded labels as a 2D list of shape (n_samples, n_classes). Example: [[1,0,0], [0,1,0], [0,0,1]] for 3 classes",
+    )
+    hidden_layers: List[int] = Field(
+        default=[64, 32],
+        description="Number of neurons in each hidden layer. Example: [128, 64, 32] creates 3 hidden layers",
+    )
+    activation: Literal["relu", "sigmoid", "tanh"] = Field(
+        default="relu",
+        description="Activation function: 'relu' (recommended), 'sigmoid', or 'tanh'",
+    )
+    learning_rate: float = Field(
+        default=0.001,
+        ge=0.0001,
+        le=0.01,
+        description="Learning rate for optimizer. Lower values give more stable training",
+    )
+    max_epochs: int = Field(
+        default=500,
+        ge=100,
+        le=2000,
+        description="Maximum number of training epochs",
+    )
+    batch_size: int = Field(
+        default=32,
+        ge=16,
+        le=128,
+        description="Mini-batch size. Larger batches are more stable but slower per epoch",
+    )
+    optimizer: Literal["adam", "sgd", "rmsprop"] = Field(
+        default="adam",
+        description="Optimization algorithm: 'adam' (recommended), 'sgd', or 'rmsprop'",
+    )
+
+
 @tool
 def train_mlp_tool(
-    X_train: List[List[float]] = Field(description="Training feature matrix as a 2D list of shape (n_samples, n_features)"),
-    y_train: List[List[float]] = Field(description="One-hot encoded labels as a 2D list of shape (n_samples, n_classes). Example: [[1,0,0], [0,1,0], [0,0,1]] for 3 classes"),
-    hidden_layers: List[int] = Field(default=[64, 32], description="Number of neurons in each hidden layer. Example: [128, 64, 32] creates 3 hidden layers"),
-    activation: Literal["relu", "sigmoid", "tanh"] = Field(default="relu", description="Activation function: 'relu' (recommended), 'sigmoid', or 'tanh'"),
-    learning_rate: float = Field(default=0.001, ge=0.0001, le=0.01, description="Learning rate for optimizer. Lower values give more stable training"),
-    max_epochs: int = Field(default=500, ge=100, le=2000, description="Maximum number of training epochs"),
-    batch_size: int = Field(default=32, ge=16, le=128, description="Mini-batch size. Larger batches are more stable but slower per epoch"),
-    optimizer: Literal["adam", "sgd", "rmsprop"] = Field(default="adam", description="Optimization algorithm: 'adam' (recommended), 'sgd', or 'rmsprop'")
+    X_train: List[List[float]],
+    y_train: List[List[float]],
+    hidden_layers: List[int] = [64, 32],
+    activation: Literal["relu", "sigmoid", "tanh"] = "relu",
+    learning_rate: float = 0.001,
+    max_epochs: int = 500,
+    batch_size: int = 32,
+    optimizer: Literal["adam", "sgd", "rmsprop"] = "adam",
 ) -> Dict[str, Any]:
     """
     Train a Multi-Layer Perceptron (MLP) neural network for classification.
