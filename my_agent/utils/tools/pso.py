@@ -4,6 +4,82 @@ from pydantic import Field
 from langchain_core.tools import tool
 
 
+def calculate_optimization_metrics(best_pos: np.ndarray, best_score: float,
+                                    known_optimal: float = 0.0,
+                                    convergence_history: Optional[List[float]] = None) -> Dict[str, Any]:
+    """
+    Calculate continuous optimization metrics.
+    
+    Args:
+        best_pos: Best position found
+        best_score: Best fitness value found
+        known_optimal: Known global minimum value
+        convergence_history: History of best fitness values
+    
+    Returns:
+        Dictionary with optimization metrics
+    """
+    dimensions = len(best_pos)
+    
+    metrics = {
+        "best_fitness": float(best_score),
+        "known_optimal": float(known_optimal),
+        "dimensions": dimensions,
+        "position_norm": float(np.linalg.norm(best_pos)),
+    }
+    
+    # Gap metrics
+    gap = best_score - known_optimal
+    metrics["absolute_gap"] = float(gap)
+    
+    if abs(known_optimal) > 1e-10:
+        gap_percentage = (gap / abs(known_optimal)) * 100
+        metrics["relative_gap_percentage"] = float(gap_percentage)
+    else:
+        metrics["relative_gap_percentage"] = float(best_score * 100)  # For optimal=0
+    
+    # Performance rating based on gap
+    if gap < 1e-6:
+        metrics["performance_rating"] = "excellent"
+        metrics["solution_quality"] = "optimal"
+    elif gap < 0.1:
+        metrics["performance_rating"] = "excellent"
+        metrics["solution_quality"] = "near-optimal"
+    elif gap < 1.0:
+        metrics["performance_rating"] = "good"
+        metrics["solution_quality"] = "good"
+    elif gap < 10.0:
+        metrics["performance_rating"] = "acceptable"
+        metrics["solution_quality"] = "acceptable"
+    else:
+        metrics["performance_rating"] = "poor"
+        metrics["solution_quality"] = "suboptimal"
+    
+    # Convergence analysis
+    if convergence_history and len(convergence_history) > 1:
+        metrics["initial_fitness"] = float(convergence_history[0])
+        metrics["improvement"] = float(convergence_history[0] - best_score)
+        metrics["improvement_factor"] = float(convergence_history[0] / (best_score + 1e-10))
+        
+        # Check for early convergence
+        last_10 = convergence_history[-10:] if len(convergence_history) >= 10 else convergence_history
+        if len(last_10) > 1:
+            variance = np.var(last_10)
+            metrics["convergence_variance"] = float(variance)
+            metrics["converged"] = variance < 1e-10
+        
+        # Iterations to reach 90% of improvement
+        total_improvement = convergence_history[0] - best_score
+        if total_improvement > 0:
+            threshold = convergence_history[0] - 0.9 * total_improvement
+            for i, val in enumerate(convergence_history):
+                if val <= threshold:
+                    metrics["iterations_to_90_percent"] = i
+                    break
+    
+    return metrics
+
+
 class PSO:
     """
     Particle Swarm Optimization for continuous optimization.
@@ -249,7 +325,6 @@ def pso_tool(
         
         func, default_bounds = BENCHMARK_FUNCTIONS[function_name]
         
-        # Set up bounds
         if custom_bounds is not None:
             bounds = [(b[0], b[1]) for b in custom_bounds]
             if len(bounds) != dimensions:
@@ -257,10 +332,8 @@ def pso_tool(
         else:
             bounds = [default_bounds] * dimensions
         
-        # Known optimal values (all at 0 for these benchmark functions)
         known_optimal = 0.0
         
-        # Run PSO
         pso = PSO(
             n_particles=n_particles,
             max_iterations=max_iterations,
@@ -273,19 +346,27 @@ def pso_tool(
         
         best_pos, best_score = pso.optimize(func, bounds)
         
-        return {
+        # Calculate metrics
+        metrics = calculate_optimization_metrics(
+            best_pos, best_score, known_optimal, pso._history
+        )
+        
+        result = {
             "status": "success",
             "message": f"PSO optimization completed for {dimensions}D {function_name} function",
             "best_position": best_pos.tolist(),
             "best_fitness": float(best_score),
             "known_optimal": known_optimal,
-            "gap": float(best_score - known_optimal),
-            "gap_percentage": float((best_score - known_optimal) / (abs(known_optimal) + 1e-10) * 100) if known_optimal != 0 else float(best_score),
             "dimensions": dimensions,
             "n_particles": n_particles,
             "iterations_run": max_iterations,
-            "convergence_history": pso._history[-20:]  # Last 20 iterations
+            "convergence_history": pso._history[-20:],
+            "metrics": metrics
         }
+        
+        result["message"] = f"PSO completed. Best: {best_score:.6f}, Gap: {metrics['absolute_gap']:.6f} ({metrics['performance_rating']})"
+        
+        return result
         
     except Exception as e:
         return {"status": "error", "message": str(e)}

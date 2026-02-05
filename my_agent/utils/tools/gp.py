@@ -9,6 +9,34 @@ from langchain_core.tools import tool
 # In-memory model storage
 MODEL_STORE: Dict[str, Any] = {}
 
+def calculate_regression_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, Any]:
+    """Calculate regression metrics."""
+    y_true = np.asarray(y_true).flatten()
+    y_pred = np.asarray(y_pred).flatten()
+    
+    n = len(y_true)
+    mse = float(np.mean((y_true - y_pred) ** 2))
+    rmse = float(np.sqrt(mse))
+    mae = float(np.mean(np.abs(y_true - y_pred)))
+    
+    ss_res = np.sum((y_true - y_pred) ** 2)
+    ss_tot = np.sum((y_true - np.mean(y_true)) ** 2)
+    r2 = float(1 - (ss_res / ss_tot)) if ss_tot > 0 else 0.0
+    
+    mask = y_true != 0
+    mape = float(np.mean(np.abs((y_true[mask] - y_pred[mask]) / y_true[mask])) * 100) if np.any(mask) else float('inf')
+    max_error = float(np.max(np.abs(y_true - y_pred)))
+    
+    return {
+        "mse": mse,
+        "rmse": rmse,
+        "mae": mae,
+        "r2_score": r2,
+        "mape": mape,
+        "max_error": max_error,
+        "n_samples": n
+    }
+
 
 class GPNode:
     """
@@ -342,6 +370,10 @@ def train_gp_tool(
         model_id = f"gp_{uuid.uuid4().hex[:8]}"
         MODEL_STORE[model_id] = model
         
+        # Calculate training metrics
+        train_pred = model.predict(X)
+        train_metrics = calculate_regression_metrics(y, train_pred)
+        
         return {
             "status": "success",
             "message": "Genetic Programming completed successfully",
@@ -351,16 +383,17 @@ def train_gp_tool(
             "tree_size": best_tree.size(),
             "tree_depth": best_tree.depth(),
             "n_samples": len(X),
+            "training_r2": train_metrics["r2_score"],
             "convergence_history": model._history[-10:]
         }
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
-
 @tool
 def inference_gp_tool(
     model_id: str = Field(description="The unique model ID returned from train_gp_tool"),
-    X_test: List[float] = Field(description="Test input values as a 1D list")
+    X_test: List[float] = Field(description="Test input values as a 1D list"),
+    y_true: Optional[List[float]] = Field(default=None, description="Optional ground truth values for computing regression metrics")
 ) -> Dict[str, Any]:
     """
     Make predictions using an evolved GP expression.
@@ -377,6 +410,8 @@ def inference_gp_tool(
             - predictions (List[float]): Predicted output values
             - expression (str): The formula being evaluated
             - n_samples (int): Number of predictions
+            - metrics (Dict[str, Any]): when y_true is provided:
+                - MSE, RMSE, MAE, R², MAPE
     
     Example:
         >>> result = inference_gp_tool(
@@ -397,12 +432,24 @@ def inference_gp_tool(
         
         predictions = model.predict(X)
         
-        return {
+        result = {
             "status": "success",
             "message": f"Successfully predicted {len(predictions)} samples",
             "predictions": predictions.tolist(),
             "expression": model._best_program.to_string(),
             "n_samples": len(predictions)
         }
+        
+        # Calculate metrics if ground truth is provided
+        if y_true is not None:
+            y_true_arr = np.array(y_true)
+            if len(y_true_arr) != len(predictions):
+                return {"status": "error", "message": "y_true length must match X_test samples"}
+            
+            metrics = calculate_regression_metrics(y_true_arr, predictions)
+            result["metrics"] = metrics
+            result["message"] = f"Successfully predicted {len(predictions)} samples with R²={metrics['r2_score']:.3f}"
+        
+        return result
     except Exception as e:
         return {"status": "error", "message": str(e)}

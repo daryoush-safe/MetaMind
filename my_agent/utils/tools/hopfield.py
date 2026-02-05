@@ -8,6 +8,68 @@ from langchain_core.tools import tool
 MODEL_STORE: Dict[str, Any] = {}
 
 
+def calculate_pattern_metrics(original: np.ndarray, input_pattern: np.ndarray, 
+                               recalled: np.ndarray, stored_patterns: np.ndarray) -> Dict[str, Any]:
+    """
+    Calculate pattern recall metrics for Hopfield network.
+    
+    Args:
+        original: The original clean pattern (ground truth)
+        input_pattern: The noisy/corrupted input
+        recalled: The pattern recalled by the network
+        stored_patterns: All patterns stored in the network
+    
+    Returns:
+        Dictionary with recall metrics
+    """
+    original = np.asarray(original).flatten()
+    input_pattern = np.asarray(input_pattern).flatten()
+    recalled = np.asarray(recalled).flatten()
+    
+    n_bits = len(original)
+    
+    # Bits corrupted in input
+    input_errors = int(np.sum(original != input_pattern))
+    input_error_rate = input_errors / n_bits
+    
+    # Bits different between recalled and original
+    recall_errors = int(np.sum(original != recalled))
+    recall_accuracy = 1.0 - (recall_errors / n_bits)
+    
+    # Bits corrected (were wrong in input, now correct)
+    bits_corrected = int(np.sum((input_pattern != original) & (recalled == original)))
+    
+    # Bits incorrectly changed (were correct in input, now wrong)
+    bits_incorrectly_changed = int(np.sum((input_pattern == original) & (recalled != original)))
+    
+    # Perfect recall check
+    perfect_recall = recall_errors == 0
+    
+    # Check if recalled matches any stored pattern
+    matched_pattern_idx = None
+    for i, pattern in enumerate(stored_patterns):
+        if np.array_equal(recalled, pattern):
+            matched_pattern_idx = i
+            break
+    
+    # Spurious state detection
+    is_spurious = matched_pattern_idx is None
+    
+    return {
+        "recall_accuracy": float(recall_accuracy),
+        "input_error_rate": float(input_error_rate),
+        "bits_corrupted_in_input": input_errors,
+        "bits_corrected": bits_corrected,
+        "bits_incorrectly_changed": bits_incorrectly_changed,
+        "final_errors": recall_errors,
+        "perfect_recall": perfect_recall,
+        "matched_stored_pattern": matched_pattern_idx,
+        "is_spurious_state": is_spurious,
+        "correction_rate": float(bits_corrected / input_errors) if input_errors > 0 else 1.0,
+        "total_bits": n_bits
+    }
+
+
 class HopfieldNetwork:
     """
     Hopfield Network for associative memory and pattern completion.
@@ -250,19 +312,16 @@ def train_hopfield_tool(
         if len(P.shape) != 2:
             return {"status": "error", "message": "patterns must be a 2D array"}
         
-        # Validate bipolar encoding
         if not np.all(np.isin(P, [-1, 1])):
             return {"status": "error", "message": "Patterns must contain only -1 and 1 values"}
         
         n_patterns, n_neurons = P.shape
         capacity = int(0.14 * n_neurons)
         
+        warning = None
         if n_patterns > capacity:
-            warning = f"Warning: Storing {n_patterns} patterns exceeds recommended capacity of {capacity}. May have recall errors."
-        else:
-            warning = None
+            warning = f"Warning: Storing {n_patterns} patterns exceeds recommended capacity of {capacity}."
         
-        # Create and train network
         model = HopfieldNetwork(
             max_iterations=max_iterations,
             threshold=threshold,
@@ -271,11 +330,9 @@ def train_hopfield_tool(
         )
         model.train(P)
         
-        # Store model
         model_id = f"hopfield_{uuid.uuid4().hex[:8]}"
         MODEL_STORE[model_id] = model
         
-        # Calculate energy of each stored pattern
         pattern_energies = [model.pattern_energy(p) for p in P]
         
         result = {
@@ -285,6 +342,7 @@ def train_hopfield_tool(
             "n_patterns": n_patterns,
             "n_neurons": n_neurons,
             "capacity": capacity,
+            "capacity_utilization": float(n_patterns / capacity) if capacity > 0 else float('inf'),
             "pattern_energies": pattern_energies
         }
         
@@ -292,7 +350,6 @@ def train_hopfield_tool(
             result["warning"] = warning
         
         return result
-        
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
@@ -300,7 +357,8 @@ def train_hopfield_tool(
 @tool
 def inference_hopfield_tool(
     model_id: str = Field(description="The unique model ID returned from train_hopfield_tool"),
-    pattern: List[int] = Field(description="Input pattern as a 1D list of values (-1 or 1). Can be noisy/partial version of stored pattern")
+    pattern: List[int] = Field(description="Input pattern as a 1D list of values (-1 or 1). Can be noisy/partial"),
+    original_pattern: Optional[List[int]] = Field(default=None, description="Optional original clean pattern for computing recall accuracy metrics")
 ) -> Dict[str, Any]:
     """
     Recall a stored pattern from a (possibly corrupted) input using a trained Hopfield Network.
@@ -338,6 +396,10 @@ def inference_hopfield_tool(
             - input_energy (float): Energy of the input pattern
             - output_energy (float): Energy of the recalled pattern
             - n_different (int): Number of bits that changed
+            - metrics (Dict[str, Any]) Metrics when original_pattern is provided:
+                - Recall accuracy: Percentage of bits matching the original
+                - Correction rate: Percentage of corrupted bits that were fixed
+                - Spurious state detection: Whether the recall converged to a non-stored pattern
     
     Example:
         >>> # Recall with 20% noise
@@ -351,7 +413,7 @@ def inference_hopfield_tool(
     """
     try:
         if model_id not in MODEL_STORE:
-            return {"status": "error", "message": f"Model '{model_id}' not found. Train a model first."}
+            return {"status": "error", "message": f"Model '{model_id}' not found."}
         
         model = MODEL_STORE[model_id]
         p = np.array(pattern)
@@ -359,31 +421,37 @@ def inference_hopfield_tool(
         if len(p.shape) != 1:
             return {"status": "error", "message": "pattern must be a 1D array"}
         if len(p) != model.n_neurons:
-            return {
-                "status": "error",
-                "message": f"Pattern length {len(p)} doesn't match network size {model.n_neurons}"
-            }
+            return {"status": "error", "message": f"Pattern length {len(p)} doesn't match network size {model.n_neurons}"}
         if not np.all(np.isin(p, [-1, 1])):
             return {"status": "error", "message": "Pattern must contain only -1 and 1 values"}
         
-        # Calculate input energy
         input_energy = model.pattern_energy(p)
-        
-        # Recall pattern
         recalled = model.predict(p)
-        
-        # Calculate output energy and differences
         output_energy = model.pattern_energy(recalled)
         n_different = int(np.sum(p != recalled))
         
-        return {
+        result = {
             "status": "success",
             "message": f"Pattern recalled. {n_different} bits changed.",
             "recalled_pattern": recalled.tolist(),
             "input_energy": float(input_energy),
             "output_energy": float(output_energy),
-            "n_different": n_different
+            "n_different": n_different,
+            "energy_decreased": output_energy < input_energy
         }
         
+        # Calculate detailed metrics if original pattern is provided
+        if original_pattern is not None:
+            orig = np.array(original_pattern)
+            if len(orig) != model.n_neurons:
+                return {"status": "error", "message": f"original_pattern length must match pattern length"}
+            if not np.all(np.isin(orig, [-1, 1])):
+                return {"status": "error", "message": "original_pattern must contain only -1 and 1 values"}
+            
+            metrics = calculate_pattern_metrics(orig, p, recalled, model._stored_patterns)
+            result["metrics"] = metrics
+            result["message"] = f"Pattern recalled with {metrics['recall_accuracy']*100:.1f}% accuracy"
+        
+        return result
     except Exception as e:
         return {"status": "error", "message": str(e)}

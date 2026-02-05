@@ -4,6 +4,76 @@ from pydantic import Field
 from langchain_core.tools import tool
 
 
+def calculate_tsp_metrics(best_tour: np.ndarray, best_fitness: float, 
+                          distance_matrix: np.ndarray,
+                          known_optimal: Optional[float] = None,
+                          convergence_history: Optional[List[float]] = None) -> Dict[str, Any]:
+    """
+    Calculate TSP optimization metrics.
+    
+    Args:
+        best_tour: Best tour found
+        best_fitness: Length of best tour
+        distance_matrix: Distance matrix
+        known_optimal: Known optimal solution (if available)
+        convergence_history: History of best fitness values
+    
+    Returns:
+        Dictionary with optimization metrics
+    """
+    n_cities = len(best_tour)
+    
+    metrics = {
+        "tour_length": float(best_fitness),
+        "n_cities": n_cities,
+        "avg_edge_length": float(best_fitness / n_cities),
+    }
+    
+    # Calculate tour statistics
+    edge_lengths = []
+    for i in range(n_cities):
+        j = (i + 1) % n_cities
+        edge_lengths.append(distance_matrix[best_tour[i], best_tour[j]])
+    
+    metrics["min_edge"] = float(np.min(edge_lengths))
+    metrics["max_edge"] = float(np.max(edge_lengths))
+    metrics["edge_std"] = float(np.std(edge_lengths))
+    
+    # Optimality metrics if known optimal is provided
+    if known_optimal is not None and known_optimal > 0:
+        gap = best_fitness - known_optimal
+        gap_percentage = (gap / known_optimal) * 100
+        metrics["known_optimal"] = float(known_optimal)
+        metrics["optimality_gap"] = float(gap)
+        metrics["optimality_gap_percentage"] = float(gap_percentage)
+        metrics["is_optimal"] = gap_percentage < 0.01  # Within 0.01%
+        
+        # Performance rating
+        if gap_percentage < 1:
+            metrics["performance_rating"] = "excellent"
+        elif gap_percentage < 5:
+            metrics["performance_rating"] = "good"
+        elif gap_percentage < 10:
+            metrics["performance_rating"] = "acceptable"
+        else:
+            metrics["performance_rating"] = "poor"
+    
+    # Convergence analysis
+    if convergence_history and len(convergence_history) > 1:
+        metrics["initial_fitness"] = float(convergence_history[0])
+        metrics["improvement"] = float(convergence_history[0] - best_fitness)
+        metrics["improvement_percentage"] = float((convergence_history[0] - best_fitness) / convergence_history[0] * 100)
+        
+        # Check for early convergence
+        last_10 = convergence_history[-10:] if len(convergence_history) >= 10 else convergence_history
+        if len(last_10) > 1:
+            variance = np.var(last_10)
+            metrics["convergence_variance"] = float(variance)
+            metrics["converged"] = variance < 1e-6
+    
+    return metrics
+
+
 class GeneticAlgorithm:
     """
     Genetic Algorithm for combinatorial optimization.
@@ -181,15 +251,16 @@ def _calculate_tour_length(tour: np.ndarray, distance_matrix: np.ndarray) -> flo
 
 @tool
 def ga_tool(
-    distance_matrix: List[List[float]] = Field(description="Distance/cost matrix as a 2D list. For TSP, distance_matrix[i][j] is the distance from city i to city j"),
+    distance_matrix: List[List[float]] = Field(description="Distance/cost matrix as a 2D list"),
     population_size: int = Field(default=100, ge=50, le=500, description="Number of individuals in the population"),
     generations: int = Field(default=500, ge=100, le=2000, description="Number of evolutionary generations"),
-    crossover_rate: float = Field(default=0.8, ge=0.6, le=0.95, description="Probability of crossover between parents"),
+    crossover_rate: float = Field(default=0.8, ge=0.6, le=0.95, description="Probability of crossover"),
     mutation_rate: float = Field(default=0.1, ge=0.01, le=0.3, description="Probability of mutation"),
-    selection: Literal["tournament", "roulette", "rank"] = Field(default="tournament", description="Selection method for choosing parents"),
-    tournament_size: int = Field(default=3, ge=2, le=10, description="Tournament size (only used with tournament selection)"),
-    elitism: int = Field(default=2, ge=0, le=10, description="Number of best individuals to preserve each generation"),
-    crossover_type: Literal["pmx", "ox", "cx", "single", "two_point", "uniform"] = Field(default="pmx", description="Crossover operator type. PMX and OX are best for permutation problems like TSP")
+    selection: Literal["tournament", "roulette", "rank"] = Field(default="tournament", description="Selection method"),
+    tournament_size: int = Field(default=3, ge=2, le=10, description="Tournament size"),
+    elitism: int = Field(default=2, ge=0, le=10, description="Number of best individuals to preserve"),
+    crossover_type: Literal["pmx", "ox", "cx", "single", "two_point", "uniform"] = Field(default="pmx", description="Crossover operator type"),
+    known_optimal: Optional[float] = Field(default=None, description="Known optimal tour length for computing optimality gap")
 ) -> Dict[str, Any]:
     """
     Solve combinatorial optimization problems using Genetic Algorithm.
@@ -275,11 +346,9 @@ def ga_tool(
         
         n_cities = dist_matrix.shape[0]
         
-        # Create fitness function for TSP
         def fitness_func(tour):
             return _calculate_tour_length(tour, dist_matrix)
         
-        # Run GA
         ga = GeneticAlgorithm(
             population_size=population_size,
             generations=generations,
@@ -293,15 +362,29 @@ def ga_tool(
         
         best_tour, best_fitness = ga.fit(fitness_func, n_cities)
         
-        return {
+        # Calculate metrics
+        metrics = calculate_tsp_metrics(
+            best_tour, best_fitness, dist_matrix,
+            known_optimal=known_optimal,
+            convergence_history=ga._history
+        )
+        
+        result = {
             "status": "success",
             "message": f"GA optimization completed for {n_cities}-city problem",
             "best_tour": best_tour.tolist(),
             "best_fitness": float(best_fitness),
             "n_cities": n_cities,
             "generations_run": generations,
-            "convergence_history": ga._history[-20:]  # Last 20 generations
+            "convergence_history": ga._history[-20:],
+            "metrics": metrics
         }
+        
+        # Add summary message based on metrics
+        if "performance_rating" in metrics:
+            result["message"] = f"GA optimization completed. Tour length: {best_fitness:.2f}, Gap: {metrics['optimality_gap_percentage']:.2f}% ({metrics['performance_rating']})"
+        
+        return result
         
     except Exception as e:
         return {"status": "error", "message": str(e)}

@@ -1,11 +1,54 @@
 import numpy as np
 import uuid
 from typing import List, Optional, Any, Dict
-from pydantic import Field
+from pydantic import Field, BaseModel
 from langchain_core.tools import tool
 
 # In-memory model storage (in production, use Redis or a database)
 MODEL_STORE: Dict[str, Any] = {}
+
+
+def calculate_classification_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, Any]:
+    """
+    Calculate classification metrics for binary classification.
+    
+    Args:
+        y_true: Ground truth labels (0 or 1)
+        y_pred: Predicted labels (0 or 1)
+    
+    Returns:
+        Dictionary with accuracy, precision, recall, f1_score, confusion_matrix
+    """
+    y_true = np.asarray(y_true).flatten()
+    y_pred = np.asarray(y_pred).flatten()
+    
+    # Basic counts
+    tp = np.sum((y_true == 1) & (y_pred == 1))
+    tn = np.sum((y_true == 0) & (y_pred == 0))
+    fp = np.sum((y_true == 0) & (y_pred == 1))
+    fn = np.sum((y_true == 1) & (y_pred == 0))
+    
+    # Metrics
+    accuracy = (tp + tn) / (tp + tn + fp + fn) if (tp + tn + fp + fn) > 0 else 0.0
+    precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+    recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+    f1_score = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+    
+    return {
+        "accuracy": float(accuracy),
+        "precision": float(precision),
+        "recall": float(recall),
+        "f1_score": float(f1_score),
+        "confusion_matrix": {
+            "true_positives": int(tp),
+            "true_negatives": int(tn),
+            "false_positives": int(fp),
+            "false_negatives": int(fn)
+        },
+        "total_samples": int(len(y_true)),
+        "correct_predictions": int(tp + tn),
+        "incorrect_predictions": int(fp + fn)
+    }
 
 
 class Perceptron:
@@ -49,6 +92,7 @@ class Perceptron:
         self.weights: Optional[np.ndarray] = None
         self.bias_weight: float = 0.0
         self._is_fitted: bool = False
+        self._training_history: List[Dict] = []
 
     def fit(self, X: np.ndarray, y: np.ndarray) -> 'Perceptron':
         """
@@ -79,6 +123,7 @@ class Perceptron:
         # Initialize weights to zeros
         self.weights = np.zeros(n_features)
         self.bias_weight = 0.0
+        self._training_history = []
         
         for epoch in range(self.max_epochs):
             errors = 0
@@ -100,6 +145,13 @@ class Perceptron:
                 
                 if update != 0:
                     errors += 1
+            
+            # Track training progress
+            self._training_history.append({
+                "epoch": epoch + 1,
+                "errors": errors,
+                "error_rate": errors / n_samples
+            })
             
             # Early stopping if converged (no misclassifications)
             if errors == 0:
@@ -142,13 +194,38 @@ class Perceptron:
         }
 
 
-@tool
+class TrainPerceptronInput(BaseModel):
+    X_train: List[List[float]] = Field(
+        description="Training feature matrix as a 2D list of shape (n_samples, n_features)",
+    )
+    y_train: List[int] = Field(
+        description="Training labels as a list of binary values (0 or 1)",
+    )
+    learning_rate: float = Field(
+        default=0.01,
+        ge=0.001,
+        le=0.1,
+        description="Learning rate for weight updates. Higher values mean faster but potentially unstable learning.",
+    )
+    max_epochs: int = Field(
+        default=100,
+        ge=50,
+        le=1000,
+        description="Maximum number of training iterations over the dataset.",
+    )
+    bias: bool = Field(
+        default=True,
+        description="Whether to include a bias term in the model.",
+    )
+
+
+@tool(args_schema=TrainPerceptronInput)
 def train_perceptron_tool(
-    X_train: List[List[float]] = Field(description="Training feature matrix as a 2D list of shape (n_samples, n_features)"),
-    y_train: List[int] = Field(description="Training labels as a list of binary values (0 or 1)"),
-    learning_rate: float = Field(default=0.01, ge=0.001, le=0.1, description="Learning rate for weight updates. Higher values mean faster but potentially unstable learning."),
-    max_epochs: int = Field(default=100, ge=50, le=1000, description="Maximum number of training iterations over the dataset."),
-    bias: bool = Field(default=True, description="Whether to include a bias term in the model.")
+    X_train: List[List[float]],
+    y_train: List[int],
+    learning_rate: float = 0.01,
+    max_epochs: int = 100,
+    bias: bool = True,
 ) -> Dict[str, Any]:
     """
     Train a Perceptron classifier on the provided dataset.
@@ -193,6 +270,8 @@ def train_perceptron_tool(
             - bias_weight (float): Learned bias term
             - n_features (int): Number of input features
             - n_samples (int): Number of training samples
+            - converged (bool): Whether training converged
+            - epochs_run (int): Actual number of epochs run
     
     Example:
         >>> result = train_perceptron_tool(
@@ -214,8 +293,6 @@ def train_perceptron_tool(
             return {"status": "error", "message": "y_train must be a 1D array"}
         if X.shape[0] != y.shape[0]:
             return {"status": "error", "message": f"X_train and y_train must have same number of samples"}
-        if not all(label in [0, 1] for label in y):
-            return {"status": "error", "message": "y_train must contain only binary labels (0 or 1)"}
         
         # Create and train model
         model = Perceptron(
@@ -229,6 +306,9 @@ def train_perceptron_tool(
         model_id = f"perceptron_{uuid.uuid4().hex[:8]}"
         MODEL_STORE[model_id] = model
         
+        # Check convergence
+        converged = len(model._training_history) < max_epochs or model._training_history[-1]["errors"] == 0
+        
         return {
             "status": "success",
             "message": f"Perceptron trained successfully on {X.shape[0]} samples with {X.shape[1]} features",
@@ -236,17 +316,22 @@ def train_perceptron_tool(
             "weights": model.weights.tolist(),
             "bias_weight": model.bias_weight,
             "n_features": X.shape[1],
-            "n_samples": X.shape[0]
+            "n_samples": X.shape[0],
+            "converged": converged,
+            "epochs_run": len(model._training_history),
+            "final_error_rate": model._training_history[-1]["error_rate"] if model._training_history else None
         }
         
     except Exception as e:
+        print("error during perceptron:", e)
         return {"status": "error", "message": str(e)}
 
 
 @tool
 def inference_perceptron_tool(
     model_id: str = Field(description="The unique model ID returned from train_perceptron_tool"),
-    X_test: List[List[float]] = Field(description="Test feature matrix as a 2D list of shape (n_samples, n_features)")
+    X_test: List[List[float]] = Field(description="Test feature matrix as a 2D list of shape (n_samples, n_features)"),
+    y_true: Optional[List[int]] = Field(default=None, description="Optional ground truth labels for computing metrics (list of 0s and 1s)")
 ) -> Dict[str, Any]:
     """
     Make predictions using a trained Perceptron model.
@@ -258,10 +343,19 @@ def inference_perceptron_tool(
     1. First train a model using train_perceptron_tool to get a model_id
     2. Use this tool with that model_id to make predictions
     
+    **Metrics (when y_true is provided):**
+    If ground truth labels are provided, the tool computes:
+    - Accuracy: Overall correctness
+    - Precision: True positives / (True positives + False positives)
+    - Recall: True positives / (True positives + False negatives)
+    - F1 Score: Harmonic mean of precision and recall
+    - Confusion Matrix: TP, TN, FP, FN counts
+    
     Args:
         model_id: The unique identifier returned from train_perceptron_tool.
         X_test: Test feature matrix as a 2D list. Must have the same number
             of features as the training data.
+        y_true: Optional ground truth labels for computing metrics.
     
     Returns:
         Dict containing:
@@ -269,13 +363,16 @@ def inference_perceptron_tool(
             - message (str): Status message
             - predictions (List[int]): Predicted class labels (0 or 1)
             - n_samples (int): Number of samples predicted
+            - metrics (Dict): Classification metrics (only if y_true provided)
     
     Example:
         >>> result = inference_perceptron_tool(
         ...     model_id="perceptron_abc12345",
-        ...     X_test=[[0.5, 0.5], [1.0, 1.0]]
+        ...     X_test=[[0.5, 0.5], [1.0, 1.0]],
+        ...     y_true=[0, 1]  # Optional: for metrics
         ... )
         >>> print(result['predictions'])  # [0, 1]
+        >>> print(result['metrics']['accuracy'])  # 1.0
     """
     try:
         # Retrieve model
@@ -297,12 +394,24 @@ def inference_perceptron_tool(
         # Make predictions
         predictions = model.predict(X)
         
-        return {
+        result = {
             "status": "success",
             "message": f"Successfully predicted {len(predictions)} samples",
             "predictions": predictions.tolist(),
             "n_samples": len(predictions)
         }
+        
+        # Calculate metrics if ground truth is provided
+        if y_true is not None:
+            y_true_arr = np.array(y_true)
+            if len(y_true_arr) != len(predictions):
+                return {"status": "error", "message": f"y_true length ({len(y_true_arr)}) must match X_test samples ({len(predictions)})"}
+            
+            metrics = calculate_classification_metrics(y_true_arr, predictions)
+            result["metrics"] = metrics
+            result["message"] = f"Successfully predicted {len(predictions)} samples with {metrics['accuracy']*100:.1f}% accuracy"
+        
+        return result
         
     except Exception as e:
         return {"status": "error", "message": str(e)}
