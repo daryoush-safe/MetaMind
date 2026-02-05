@@ -205,90 +205,63 @@ Remember to output a valid JSON plan.""")
     }
 
 
-def execute_step(state: AgentState) ->AgentState:
-    """
-    Execute the current step in the plan using tools.
-    
-    This node:
-    1. Gets current step from plan
-    2. Calls the appropriate tool
-    3. Records the result
-    4. Updates state for next iteration
-    """
+def execute_step(state: AgentState) -> AgentState:
     plan = state["plan"]
+    # Start from where we left off (usually 0)
     current_index = state["current_step_index"]
-
-    if plan is None or current_index >= len(plan.steps):
-        return {
-            "should_replan": False,
-            "iteration_count": state.get("iteration_count", 0) + 1
-        }
-    
-    current_step = plan.steps[current_index]
-    
-    # Build execution message
-    execution_prompt = f"""Execute this step:
-Step {current_step.step_id}: {current_step.description}
-Tool: {current_step.tool_name}
-Arguments: {json.dumps(current_step.tool_args) if current_step.tool_args else 'None'}
-
-Previous steps completed: {len(state.get('past_steps', []))}
-Model IDs available: {state.get('model_store', {})}
-
-Call the appropriate tool now."""
-
-    messages = [
-        SystemMessage(content=EXECUTOR_SYSTEM_PROMPT),
-        HumanMessage(content=execution_prompt)
-    ]
-    
-    model_with_tools = get_llm().bind_tools(ALL_TOOLS)
-    history = state["messages"][-10:-1]
-    response = model_with_tools.invoke(messages + history)
-    
-    result = None
+    past_steps = list(state.get("past_steps", []))
     new_model_store = dict(state.get("model_store", {}))
-    
-    if hasattr(response, 'tool_calls') and response.tool_calls:
-        for tool_call in response.tool_calls:
-            tool_name = tool_call['name']
-            tool_args = tool_call['args']
+    new_messages = []
+
+    if not plan or not plan.steps:
+        return {"should_replan": True}
+
+    while current_index < len(plan.steps):
+        step = plan.steps[current_index]
+        
+        tool_to_use = next((t for t in ALL_TOOLS if t.name == step.tool_name), None)
+        
+        if tool_to_use:
+            try:
+                # Inject model_id if this is an inference step
+                args = step.tool_args or {}
+
+                result = tool_to_use.invoke(args)
+                step.status = "completed"
+                
+                if isinstance(result, dict) and 'model_id' in result:
+                    method_key = step.tool_name.replace('train_', '').replace('_tool', '')
+                    new_model_store[method_key] = result['model_id']
+            except Exception as e:
+                result = {"status": "error", "message": str(e)}
+                step.status = "failed"
+        else:
+            llm = get_llm(temperature=0.3)
+            prompt = f"""You are executing a 'Reasoning Step' in a larger plan.
+            Task: {step.description}
+            Context from previous steps: {state.get('past_steps', [])[-2:]}
             
-            for tool in ALL_TOOLS:
-                if tool.name == tool_name:
-                    try:
-                        result = tool.invoke(tool_args)
-                        
-                        # Track model IDs for train -> inference flow
-                        if isinstance(result, dict) and 'model_id' in result:
-                            method_name = tool_name.replace('train_', '').replace('_tool', '')
-                            new_model_store[method_name] = result['model_id']
-                            
-                    except Exception as e:
-                        result = {"status": "error", "message": str(e)}
-                    break
-    else:
-        result = {"status": "no_tool_called", "response": response.content}
-    
-    # Update step status
-    current_step.status = "completed" if result and result.get("status") == "success" else "failed"
-    current_step.result = result
-    
-    # Update past steps
-    new_past_steps = list(state.get("past_steps", [])) + [(current_step, result)]
-    
-    # Update messages
-    new_messages = [
-        AIMessage(content=f"Executed step {current_step.step_id}: {json.dumps(result, default=str)[:500]}")
-    ]
-    
+            Provide your analysis or output for this specific step only."""
+            
+            response = llm.invoke(prompt)
+            result = {"output": response.content}
+            step.status = "completed"
+
+        past_steps.append((step, result))
+        new_messages.append(AIMessage(content=f"Executed {step.tool_name}: {str(result)[:200]}"))
+        current_index += 1
+
+        if step.status == "failed":
+            break
+
     return {
-        "messages": new_messages,
-        "past_steps": new_past_steps,
-        "current_step_index": current_index + 1,
+        "past_steps": past_steps,
+        "current_step_index": current_index,
         "model_store": new_model_store,
-        "iteration_count": state.get("iteration_count", 0) + 1
+        "messages": new_messages,
+        "should_replan": True # Always check with replanner after the batch
     }
+
 
 def replan_step(state: AgentState) -> AgentState:
     """

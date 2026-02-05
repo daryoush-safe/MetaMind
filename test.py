@@ -2,7 +2,6 @@ import numpy as np
 import uuid
 from typing import List, Optional, Any, Dict
 from pydantic import Field
-from langchain_core.tools import tool
 
 # In-memory model storage (in production, use Redis or a database)
 MODEL_STORE: Dict[str, Any] = {}
@@ -142,8 +141,6 @@ class Perceptron:
         }
 
 
-
-@tool
 def train_perceptron_tool(
     X_train: List[List[float]] = Field(description="Training feature matrix as a 2D list of shape (n_samples, n_features)"),
     y_train: List[int] = Field(description="Training labels as a list of binary values (0 or 1)"),
@@ -215,8 +212,6 @@ def train_perceptron_tool(
             return {"status": "error", "message": "y_train must be a 1D array"}
         if X.shape[0] != y.shape[0]:
             return {"status": "error", "message": f"X_train and y_train must have same number of samples"}
-        if not all(label in [0, 1] for label in y):
-            return {"status": "error", "message": "y_train must contain only binary labels (0 or 1)"}
         
         # Create and train model
         model = Perceptron(
@@ -243,67 +238,9 @@ def train_perceptron_tool(
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
+X = [[0, 0], [0, 1], [1, 0], [1, 1]]
+y = [1, 1, 2, 2]
 
-@tool
-def inference_perceptron_tool(
-    model_id: str = Field(description="The unique model ID returned from train_perceptron_tool"),
-    X_test: List[List[float]] = Field(description="Test feature matrix as a 2D list of shape (n_samples, n_features)")
-) -> Dict[str, Any]:
-    """
-    Make predictions using a trained Perceptron model.
-    
-    Uses a previously trained Perceptron model (identified by model_id) to
-    predict binary class labels for new samples.
-    
-    **Usage:**
-    1. First train a model using train_perceptron_tool to get a model_id
-    2. Use this tool with that model_id to make predictions
-    
-    Args:
-        model_id: The unique identifier returned from train_perceptron_tool.
-        X_test: Test feature matrix as a 2D list. Must have the same number
-            of features as the training data.
-    
-    Returns:
-        Dict containing:
-            - status (str): "success" or "error"
-            - message (str): Status message
-            - predictions (List[int]): Predicted class labels (0 or 1)
-            - n_samples (int): Number of samples predicted
-    
-    Example:
-        >>> result = inference_perceptron_tool(
-        ...     model_id="perceptron_abc12345",
-        ...     X_test=[[0.5, 0.5], [1.0, 1.0]]
-        ... )
-        >>> print(result['predictions'])  # [0, 1]
-    """
-    try:
-        # Retrieve model
-        if model_id not in MODEL_STORE:
-            return {"status": "error", "message": f"Model '{model_id}' not found. Train a model first."}
-        
-        model = MODEL_STORE[model_id]
-        X = np.array(X_test)
-        
-        # Validate input dimensions
-        if len(X.shape) != 2:
-            return {"status": "error", "message": "X_test must be a 2D array"}
-        if X.shape[1] != len(model.weights):
-            return {
-                "status": "error", 
-                "message": f"X_test has {X.shape[1]} features but model expects {len(model.weights)}"
-            }
-        
-        # Make predictions
-        predictions = model.predict(X)
-        
-        return {
-            "status": "success",
-            "message": f"Successfully predicted {len(predictions)} samples",
-            "predictions": predictions.tolist(),
-            "n_samples": len(predictions)
-        }
-        
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
+result = train_perceptron_tool(X, y)
+
+print(result)
