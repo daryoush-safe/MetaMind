@@ -9,3 +9,5 @@ python-dotenv
 chromadb 
 pandas
 scikit-learn
+sentence-transformers 
+langchain-huggingface

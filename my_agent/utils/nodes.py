@@ -86,8 +86,7 @@ def _get_llm(temperature: float = 0, model_env: str = "MODEL_NAME", inject_memor
         openai_api_base=os.environ.get("API_BASE_URL"),
         temperature=temperature,
     )
-    llm_with_memory = llm.bind_tools()
-    return llm_with_memory
+    return llm
 
 
 def get_planner_model():
@@ -200,7 +199,7 @@ def plan_step(state: PlanExecutionState) ->PlanExecutionState:
     
     # === MEMORY INJECTION ===
     # Retrieve relevant past plans and solutions
-    relevant_memories = retrieve_memories(user_input, k=5)
+    relevant_memories = retrieve_memories(state["input"], k=5)
     memory_context = format_memories_for_prompt(relevant_memories)
     
     # Enhance system prompt with memory context
