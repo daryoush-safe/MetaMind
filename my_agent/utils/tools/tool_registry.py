@@ -36,3 +36,17 @@ ALL_TOOLS = [
     read_tsp_file,
     read_and_preprocess_csv,
 ]
+
+
+DATA_LOADING_TOOLS = {"read_tsp_file", "read_and_preprocess_csv"}
+
+
+DATA_TOOL_OUTPUT_KEYS = {
+    "read_tsp_file": [
+        "distance_matrix", "dimension", "city_coords", "name", "comment", "edge_weight_type"
+    ],
+    "read_and_preprocess_csv": [
+        "X_train", "y_train", "X_test", "y_test", "feature_names",
+        "n_samples", "n_features", "target_column", "class_names", "label_encoded"
+    ],
+}
