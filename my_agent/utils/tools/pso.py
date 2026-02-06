@@ -1,4 +1,5 @@
 import numpy as np
+import time
 from typing import List, Optional, Any, Dict, Tuple, Callable
 from pydantic import Field, BaseModel
 from langchain_core.tools import tool
@@ -6,21 +7,36 @@ from langchain_core.tools import tool
 
 def calculate_optimization_metrics(best_pos: np.ndarray, best_score: float,
                                     known_optimal: float = 0.0,
-                                    convergence_history: Optional[List[float]] = None) -> Dict[str, Any]:
+                                    convergence_history: Optional[List[float]] = None,
+                                    computation_time: Optional[float] = None,
+                                    function_evaluations: int = 0,
+                                    multi_run_results: Optional[List[float]] = None) -> Dict[str, Any]:
     """
-    Calculate continuous optimization metrics.
+    Calculate comprehensive continuous optimization metrics.
+    
+    Metrics computed:
+        - Best Fitness: f(x*) - the best objective value found
+        - Mean Fitness: Average of best fitness across runs
+        - Std Dev: Standard deviation of best fitness across runs
+        - Error: |f(x*) - f(x_opt)| - absolute error from known optimum
+        - Success Rate: % of runs with error < 1e-4
+        - Function Evaluations: Total calls to objective function
     
     Args:
         best_pos: Best position found
         best_score: Best fitness value found
         known_optimal: Known global minimum value
         convergence_history: History of best fitness values
+        computation_time: Wall-clock time in seconds
+        function_evaluations: Total number of objective function calls
+        multi_run_results: Best fitness from multiple independent runs
     
     Returns:
         Dictionary with optimization metrics
     """
     dimensions = len(best_pos)
     
+    # --- Best Fitness ---
     metrics = {
         "best_fitness": float(best_score),
         "known_optimal": float(known_optimal),
@@ -28,54 +44,75 @@ def calculate_optimization_metrics(best_pos: np.ndarray, best_score: float,
         "position_norm": float(np.linalg.norm(best_pos)),
     }
     
-    # Gap metrics
-    gap = best_score - known_optimal
-    metrics["absolute_gap"] = float(gap)
+    # --- Error: |f(x*) - f(x_opt)| ---
+    error = abs(best_score - known_optimal)
+    metrics["error"] = float(error)
+    metrics["absolute_gap"] = float(best_score - known_optimal)
     
     if abs(known_optimal) > 1e-10:
-        gap_percentage = (gap / abs(known_optimal)) * 100
-        metrics["relative_gap_percentage"] = float(gap_percentage)
+        metrics["relative_gap_percentage"] = float((best_score - known_optimal) / abs(known_optimal) * 100)
     else:
-        metrics["relative_gap_percentage"] = float(best_score * 100)  # For optimal=0
+        metrics["relative_gap_percentage"] = float(best_score * 100)
     
-    # Performance rating based on gap
-    if gap < 1e-6:
+    # Performance rating
+    if error < 1e-6:
         metrics["performance_rating"] = "excellent"
         metrics["solution_quality"] = "optimal"
-    elif gap < 0.1:
+    elif error < 0.1:
         metrics["performance_rating"] = "excellent"
         metrics["solution_quality"] = "near-optimal"
-    elif gap < 1.0:
+    elif error < 1.0:
         metrics["performance_rating"] = "good"
         metrics["solution_quality"] = "good"
-    elif gap < 10.0:
+    elif error < 10.0:
         metrics["performance_rating"] = "acceptable"
         metrics["solution_quality"] = "acceptable"
     else:
         metrics["performance_rating"] = "poor"
         metrics["solution_quality"] = "suboptimal"
     
-    # Convergence analysis
+    # --- Function Evaluations ---
+    if function_evaluations > 0:
+        metrics["function_evaluations"] = function_evaluations
+    
+    # --- Computation Time ---
+    if computation_time is not None:
+        metrics["computation_time_seconds"] = float(computation_time)
+    
+    # --- Multi-run Statistics: Mean Fitness, Std Dev, Success Rate ---
+    if multi_run_results is not None and len(multi_run_results) > 0:
+        metrics["mean_fitness"] = float(np.mean(multi_run_results))
+        metrics["std_fitness"] = float(np.std(multi_run_results))
+        metrics["median_fitness"] = float(np.median(multi_run_results))
+        metrics["best_of_runs"] = float(np.min(multi_run_results))
+        metrics["worst_of_runs"] = float(np.max(multi_run_results))
+        metrics["n_runs"] = len(multi_run_results)
+        
+        # Success Rate: % of runs with error < 1e-4
+        n_successful = sum(1 for r in multi_run_results if abs(r - known_optimal) < 1e-4)
+        metrics["success_rate_percent"] = float(n_successful / len(multi_run_results) * 100)
+        metrics["n_successful_runs"] = n_successful
+    
+    # --- Convergence Analysis ---
     if convergence_history and len(convergence_history) > 1:
         metrics["initial_fitness"] = float(convergence_history[0])
         metrics["improvement"] = float(convergence_history[0] - best_score)
         metrics["improvement_factor"] = float(convergence_history[0] / (best_score + 1e-10))
         
-        # Check for early convergence
+        # Convergence speed: iterations to reach 90% of improvement
+        total_improvement = convergence_history[0] - best_score
+        if total_improvement > 0:
+            threshold_90 = convergence_history[0] - 0.9 * total_improvement
+            for i, val in enumerate(convergence_history):
+                if val <= threshold_90:
+                    metrics["iterations_to_90_percent"] = i
+                    break
+        
         last_10 = convergence_history[-10:] if len(convergence_history) >= 10 else convergence_history
         if len(last_10) > 1:
             variance = np.var(last_10)
             metrics["convergence_variance"] = float(variance)
             metrics["converged"] = variance < 1e-10
-        
-        # Iterations to reach 90% of improvement
-        total_improvement = convergence_history[0] - best_score
-        if total_improvement > 0:
-            threshold = convergence_history[0] - 0.9 * total_improvement
-            for i, val in enumerate(convergence_history):
-                if val <= threshold:
-                    metrics["iterations_to_90_percent"] = i
-                    break
     
     return metrics
 
@@ -119,6 +156,7 @@ class PSO:
         self.global_best_pos: Optional[np.ndarray] = None
         self.global_best_score: float = float('inf')
         self._history: List[float] = []
+        self._function_evaluations: int = 0
 
     def optimize(
         self,
@@ -149,9 +187,12 @@ class PSO:
         p_best_pos = pos.copy()
         p_best_scores = np.full(self.n_particles, float('inf'))
 
+        self._function_evaluations = 0
+
         # Evaluate initial population
         for i in range(self.n_particles):
             score = objective_func(pos[i])
+            self._function_evaluations += 1
             p_best_scores[i] = score
             if score < self.global_best_score:
                 self.global_best_score = score
@@ -162,31 +203,23 @@ class PSO:
         # Optimization loop
         w = self.w_start
         for t in range(self.max_iter):
-            # Decay inertia weight linearly
             if self.w_decay:
                 w = self.w_start - (self.w_start - 0.4) * (t / self.max_iter)
 
-            # Random coefficients
             r1 = np.random.rand(self.n_particles, n_dim)
             r2 = np.random.rand(self.n_particles, n_dim)
 
-            # Update velocity
             cognitive = self.c1 * r1 * (p_best_pos - pos)
             social = self.c2 * r2 * (self.global_best_pos - pos)
             vel = w * vel + cognitive + social
 
-            # Clamp velocity
             vel = np.clip(vel, v_min, v_max)
-
-            # Update position
             pos += vel
-
-            # Enforce bounds (clipping)
             pos = np.clip(pos, bounds[:, 0], bounds[:, 1])
 
-            # Evaluate and update bests
             for i in range(self.n_particles):
                 score = objective_func(pos[i])
+                self._function_evaluations += 1
                 
                 if score < p_best_scores[i]:
                     p_best_scores[i] = score
@@ -245,6 +278,7 @@ class PSOInput(BaseModel):
     w_decay: bool = Field(default=True, description="Whether to linearly decrease inertia weight over iterations"),
     velocity_clamp: float = Field(default=0.5, ge=0.1, le=1.0, description="Velocity clamping as fraction of search range"),
     custom_bounds: Optional[List[List[float]]] = Field(default=None, description="Custom bounds as list of [min, max] for each dimension. If None, uses function defaults")
+    n_runs: int = Field(default=1, ge=1, le=10, description="Number of independent runs for computing multi-run statistics (mean, std, success rate)")
 
 
 @tool(args_schema=PSOInput)
@@ -259,6 +293,7 @@ def pso_tool(
     w_decay: bool = True,
     velocity_clamp: float = 0.5,
     custom_bounds: Optional[List[List[float]]] = None,
+    n_runs: int = 1,
 ) -> Dict[str, Any]:
     """
     Solve continuous optimization problems using Particle Swarm Optimization.
@@ -267,7 +302,15 @@ def pso_tool(
     Each particle is influenced by its personal best position and the
     swarm's global best position.
     
-    Use for: Continuous function optimization, Multimodal problems (many local minima), Engineering design optimization
+    Use for: Continuous function optimization, Multimodal problems, Engineering design optimization
+    
+    **Metrics computed:**
+    - Best Fitness: f(x*) - best objective value found
+    - Mean Fitness: Average best fitness across runs (when n_runs > 1)
+    - Std Dev: Standard deviation of best fitness (when n_runs > 1)
+    - Error: |f(x*) - f(x_opt)| - absolute error from known optimum
+    - Success Rate: % of runs with error < 1e-4 (when n_runs > 1)
+    - Function Evaluations: Total calls to objective function
     
     **Parameter tuning:**
     - w (inertia): Higher = more exploration, lower = more exploitation
@@ -281,10 +324,10 @@ def pso_tool(
             - status: "success" or "error"
             - best_position: Best solution found
             - best_fitness: Fitness value at best position
-            - known_optimal: Known global minimum value
-            - gap: Difference from known optimal
-            - dimensions: Problem dimensions
-            - convergence_history: Best fitness per iteration
+            - error: Absolute error from known optimal
+            - function_evaluations: Total objective function calls
+            - computation_time_seconds: Wall-clock time
+            - metrics: Comprehensive optimization metrics
     """
     try:
         if function_name not in BENCHMARK_FUNCTIONS:
@@ -304,37 +347,67 @@ def pso_tool(
         
         known_optimal = 0.0
         
-        pso = PSO(
-            n_particles=n_particles,
-            max_iterations=max_iterations,
-            w=w,
-            c1=c1,
-            c2=c2,
-            w_decay=w_decay,
-            velocity_clamp=velocity_clamp
-        )
+        # Run optimization (potentially multiple times)
+        multi_run_results = []
+        best_overall_pos = None
+        best_overall_score = float('inf')
+        best_overall_history = None
+        total_func_evals = 0
+        total_time = 0.0
         
-        best_pos, best_score = pso.optimize(func, bounds)
+        for run_idx in range(n_runs):
+            pso = PSO(
+                n_particles=n_particles,
+                max_iterations=max_iterations,
+                w=w,
+                c1=c1,
+                c2=c2,
+                w_decay=w_decay,
+                velocity_clamp=velocity_clamp
+            )
+            
+            start_time = time.time()
+            best_pos, best_score = pso.optimize(func, bounds)
+            elapsed = time.time() - start_time
+            total_time += elapsed
+            total_func_evals += pso._function_evaluations
+            
+            multi_run_results.append(best_score)
+            
+            if best_score < best_overall_score:
+                best_overall_score = best_score
+                best_overall_pos = best_pos
+                best_overall_history = pso._history
         
         # Calculate metrics
         metrics = calculate_optimization_metrics(
-            best_pos, best_score, known_optimal, pso._history
+            best_overall_pos, best_overall_score, known_optimal,
+            convergence_history=best_overall_history,
+            computation_time=total_time,
+            function_evaluations=total_func_evals,
+            multi_run_results=multi_run_results if n_runs > 1 else None
         )
         
         result = {
             "status": "success",
             "message": f"PSO optimization completed for {dimensions}D {function_name} function",
-            "best_position": best_pos.tolist(),
-            "best_fitness": float(best_score),
+            "best_position": best_overall_pos.tolist(),
+            "best_fitness": float(best_overall_score),
+            "error": float(abs(best_overall_score - known_optimal)),
             "known_optimal": known_optimal,
             "dimensions": dimensions,
             "n_particles": n_particles,
             "iterations_run": max_iterations,
-            "convergence_history": pso._history[-20:],
+            "function_evaluations": total_func_evals,
+            "computation_time_seconds": float(total_time),
+            "convergence_history": best_overall_history[-20:] if best_overall_history else [],
             "metrics": metrics
         }
         
-        result["message"] = f"PSO completed. Best: {best_score:.6f}, Gap: {metrics['absolute_gap']:.6f} ({metrics['performance_rating']})"
+        msg = f"PSO completed. Best: {best_overall_score:.6f}, Error: {metrics['error']:.6f} ({metrics['performance_rating']}), FuncEvals: {total_func_evals}"
+        if n_runs > 1:
+            msg += f", Success Rate: {metrics.get('success_rate_percent', 0):.1f}%"
+        result["message"] = msg
         
         return result
         

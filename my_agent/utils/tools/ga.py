@@ -1,4 +1,5 @@
 import numpy as np
+import time
 from typing import List, Optional, Any, Dict, Literal, Callable, Tuple
 from pydantic import Field, BaseModel
 from langchain_core.tools import tool
@@ -7,9 +8,18 @@ from langchain_core.tools import tool
 def calculate_tsp_metrics(best_tour: np.ndarray, best_fitness: float, 
                           distance_matrix: np.ndarray,
                           known_optimal: Optional[float] = None,
-                          convergence_history: Optional[List[float]] = None) -> Dict[str, Any]:
+                          convergence_history: Optional[List[float]] = None,
+                          computation_time: Optional[float] = None,
+                          multi_run_results: Optional[List[float]] = None) -> Dict[str, Any]:
     """
-    Calculate TSP optimization metrics.
+    Calculate comprehensive TSP optimization metrics.
+    
+    Metrics computed:
+        - Tour Length: Sum of edge distances in the best tour
+        - Gap to Optimal: (found - optimal) / optimal * 100%
+        - Computation Time: Seconds elapsed during optimization
+        - Success Rate %: Percentage of runs within 5% of optimal
+        - Convergence Speed: Iterations to reach 90% of final quality
     
     Args:
         best_tour: Best tour found
@@ -17,19 +27,21 @@ def calculate_tsp_metrics(best_tour: np.ndarray, best_fitness: float,
         distance_matrix: Distance matrix
         known_optimal: Known optimal solution (if available)
         convergence_history: History of best fitness values
+        computation_time: Wall-clock time in seconds
+        multi_run_results: Best fitness from multiple independent runs
     
     Returns:
-        Dictionary with optimization metrics
+        Dictionary with TSP optimization metrics
     """
     n_cities = len(best_tour)
     
+    # --- Tour Length ---
     metrics = {
         "tour_length": float(best_fitness),
         "n_cities": n_cities,
         "avg_edge_length": float(best_fitness / n_cities),
     }
     
-    # Calculate tour statistics
     edge_lengths = []
     for i in range(n_cities):
         j = (i + 1) % n_cities
@@ -39,16 +51,19 @@ def calculate_tsp_metrics(best_tour: np.ndarray, best_fitness: float,
     metrics["max_edge"] = float(np.max(edge_lengths))
     metrics["edge_std"] = float(np.std(edge_lengths))
     
-    # Optimality metrics if known optimal is provided
+    # --- Computation Time ---
+    if computation_time is not None:
+        metrics["computation_time_seconds"] = float(computation_time)
+    
+    # --- Gap to Optimal ---
     if known_optimal is not None and known_optimal > 0:
         gap = best_fitness - known_optimal
         gap_percentage = (gap / known_optimal) * 100
         metrics["known_optimal"] = float(known_optimal)
         metrics["optimality_gap"] = float(gap)
         metrics["optimality_gap_percentage"] = float(gap_percentage)
-        metrics["is_optimal"] = gap_percentage < 0.01  # Within 0.01%
+        metrics["is_optimal"] = gap_percentage < 0.01
         
-        # Performance rating
         if gap_percentage < 1:
             metrics["performance_rating"] = "excellent"
         elif gap_percentage < 5:
@@ -57,14 +72,37 @@ def calculate_tsp_metrics(best_tour: np.ndarray, best_fitness: float,
             metrics["performance_rating"] = "acceptable"
         else:
             metrics["performance_rating"] = "poor"
+        
+        # --- Success Rate % (runs within 5% of optimal) ---
+        if multi_run_results is not None and len(multi_run_results) > 0:
+            threshold = known_optimal * 1.05
+            n_successful = sum(1 for r in multi_run_results if r <= threshold)
+            metrics["success_rate_percent"] = float(n_successful / len(multi_run_results) * 100)
+            metrics["n_runs"] = len(multi_run_results)
+            metrics["mean_tour_length"] = float(np.mean(multi_run_results))
+            metrics["std_tour_length"] = float(np.std(multi_run_results))
+            metrics["best_of_runs"] = float(np.min(multi_run_results))
+            metrics["worst_of_runs"] = float(np.max(multi_run_results))
     
-    # Convergence analysis
+    # --- Convergence Speed ---
     if convergence_history and len(convergence_history) > 1:
         metrics["initial_fitness"] = float(convergence_history[0])
         metrics["improvement"] = float(convergence_history[0] - best_fitness)
-        metrics["improvement_percentage"] = float((convergence_history[0] - best_fitness) / convergence_history[0] * 100)
+        metrics["improvement_percentage"] = float(
+            (convergence_history[0] - best_fitness) / convergence_history[0] * 100
+        )
         
-        # Check for early convergence
+        total_improvement = convergence_history[0] - best_fitness
+        if total_improvement > 0:
+            threshold_90 = convergence_history[0] - 0.9 * total_improvement
+            for i, val in enumerate(convergence_history):
+                if val <= threshold_90:
+                    metrics["convergence_speed_iterations"] = i
+                    metrics["convergence_speed_percent"] = float(
+                        i / len(convergence_history) * 100
+                    )
+                    break
+        
         last_10 = convergence_history[-10:] if len(convergence_history) >= 10 else convergence_history
         if len(last_10) > 1:
             variance = np.var(last_10)
@@ -126,7 +164,6 @@ class GeneticAlgorithm:
         Returns:
             Tuple[np.ndarray, float]: Best solution found and its fitness.
         """
-        # Initialize population with random permutations
         self.population = [np.random.permutation(genome_length) for _ in range(self.pop_size)]
         
         best_global_score = float('inf')
@@ -134,10 +171,8 @@ class GeneticAlgorithm:
         self._history = []
 
         for gen in range(self.generations):
-            # Evaluate fitness
             scores = np.array([fitness_func(ind) for ind in self.population])
             
-            # Track best
             min_score_idx = np.argmin(scores)
             if scores[min_score_idx] < best_global_score:
                 best_global_score = scores[min_score_idx]
@@ -145,11 +180,9 @@ class GeneticAlgorithm:
             
             self._history.append(best_global_score)
 
-            # Elitism: keep best N
             sorted_indices = np.argsort(scores)
             new_pop = [self.population[i].copy() for i in sorted_indices[:self.elitism]]
 
-            # Create rest of population
             while len(new_pop) < self.pop_size:
                 p1 = self._select(scores)
                 p2 = self._select(scores)
@@ -195,7 +228,6 @@ class GeneticAlgorithm:
             c2[pt1:pt2+1] = p2[pt1:pt2+1]
             
             if self.cx_type == "ox":
-                # Order Crossover
                 current_idx1 = (pt2 + 1) % size
                 current_idx2 = (pt2 + 1) % size
                 
@@ -209,7 +241,6 @@ class GeneticAlgorithm:
                         c2[current_idx2] = cand2
                         current_idx2 = (current_idx2 + 1) % size
             else:
-                # PMX - fill remaining with order from other parent
                 remaining1 = [x for x in p2 if x not in c1]
                 remaining2 = [x for x in p1 if x not in c2]
                 j1, j2 = 0, 0
@@ -221,7 +252,6 @@ class GeneticAlgorithm:
                         c2[i] = remaining2[j2]
                         j2 += 1
         else:
-            # Default to single-point crossover
             pt = np.random.randint(1, size)
             c1[:pt] = p1[:pt]
             remaining = [x for x in p2 if x not in c1[:pt]]
@@ -235,7 +265,6 @@ class GeneticAlgorithm:
     def _mutate(self, genome: np.ndarray) -> None:
         """Apply mutation to a genome."""
         if np.random.random() < self.mut_rate:
-            # Swap mutation
             i, j = np.random.choice(range(len(genome)), 2, replace=False)
             genome[i], genome[j] = genome[j], genome[i]
 
@@ -245,7 +274,7 @@ def _calculate_tour_length(tour: np.ndarray, distance_matrix: np.ndarray) -> flo
     total = 0.0
     for i in range(len(tour) - 1):
         total += distance_matrix[tour[i], tour[i+1]]
-    total += distance_matrix[tour[-1], tour[0]]  # Return to start
+    total += distance_matrix[tour[-1], tour[0]]
     return total
 
 
@@ -260,6 +289,7 @@ class GAInput(BaseModel):
     elitism: int = Field(default=2, ge=0, le=10, description="Number of best individuals to preserve")
     crossover_type: Literal["pmx", "ox", "cx", "single", "two_point", "uniform"] = Field(default="pmx", description="Crossover operator type")
     known_optimal: Optional[float] = Field(default=None, description="Known optimal tour length for computing optimality gap")
+    n_runs: int = Field(default=1, ge=1, le=10, description="Number of independent runs for computing success rate statistics")
 
 
 @tool(args_schema=GAInput)
@@ -273,7 +303,8 @@ def ga_tool(
     tournament_size: int = Field(default=3, ge=2, le=10, description="Tournament size"),
     elitism: int = Field(default=2, ge=0, le=10, description="Number of best individuals to preserve"),
     crossover_type: Literal["pmx", "ox", "cx", "single", "two_point", "uniform"] = Field(default="pmx", description="Crossover operator type"),
-    known_optimal: Optional[float] = Field(default=None, description="Known optimal tour length for computing optimality gap")
+    known_optimal: Optional[float] = Field(default=None, description="Known optimal tour length for computing optimality gap"),
+    n_runs: int = Field(default=1, ge=1, le=10, description="Number of independent runs for success rate statistics")
 ) -> Dict[str, Any]:
     """
     Solve combinatorial optimization problems using Genetic Algorithm.
@@ -282,23 +313,14 @@ def ga_tool(
     and mutation. This implementation is optimized for permutation-based problems
     like the Traveling Salesman Problem (TSP).
     
-    Use for: TSP, Vehicle routing problems, scheduling, Assignment problems, Any problem where solutions are permutations
+    Use for: TSP, Vehicle routing problems, scheduling, Assignment problems
     
-    **Selection methods:**
-    - tournament: Select best from random subset (recommended)
-    - roulette: Probability proportional to fitness
-    - rank: Probability based on fitness ranking
-    
-    **Crossover types for permutations:**
-    - pmx: Partially Mapped Crossover (preserves relative positions)
-    - ox: Order Crossover (preserves relative order)
-    
-    **Parameter tuning:**
-    - population_size: Larger = more exploration, slower
-    - generations: More = better solutions, diminishing returns
-    - crossover_rate: 0.8-0.9 typical, too low reduces exploration
-    - mutation_rate: 0.05-0.2 typical, too high = random search
-    - elitism: 1-5 preserves good solutions
+    **Metrics computed:**
+    - Tour Length: Total distance of best tour
+    - Gap to Optimal: Percentage above known optimal (when provided)
+    - Computation Time: Wall-clock seconds elapsed
+    - Success Rate %: Percentage of runs within 5% of optimal (when n_runs > 1)
+    - Convergence Speed: Iterations to reach 90% of final quality
     
     Returns:
         Dict containing:
@@ -306,7 +328,9 @@ def ga_tool(
             - best_tour: Best route found (city indices)
             - best_fitness: Tour length of best solution
             - n_cities: Number of cities
+            - computation_time_seconds: Wall-clock time
             - convergence_history: Best fitness per generation
+            - metrics: Comprehensive TSP metrics
     """
     try:
         dist_matrix = np.array(distance_matrix)
@@ -321,40 +345,58 @@ def ga_tool(
         def fitness_func(tour):
             return _calculate_tour_length(tour, dist_matrix)
         
-        ga = GeneticAlgorithm(
-            population_size=population_size,
-            generations=generations,
-            crossover_rate=crossover_rate,
-            mutation_rate=mutation_rate,
-            selection=selection,
-            tournament_size=tournament_size,
-            elitism=elitism,
-            crossover_type=crossover_type
-        )
+        multi_run_results = []
+        best_overall_tour = None
+        best_overall_fitness = float('inf')
+        best_overall_history = None
+        total_time = 0.0
         
-        best_tour, best_fitness = ga.fit(fitness_func, n_cities)
+        for run_idx in range(n_runs):
+            ga = GeneticAlgorithm(
+                population_size=population_size,
+                generations=generations,
+                crossover_rate=crossover_rate,
+                mutation_rate=mutation_rate,
+                selection=selection,
+                tournament_size=tournament_size,
+                elitism=elitism,
+                crossover_type=crossover_type
+            )
+            
+            start_time = time.time()
+            best_tour, best_fitness = ga.fit(fitness_func, n_cities)
+            elapsed = time.time() - start_time
+            total_time += elapsed
+            
+            multi_run_results.append(best_fitness)
+            
+            if best_fitness < best_overall_fitness:
+                best_overall_fitness = best_fitness
+                best_overall_tour = best_tour
+                best_overall_history = ga._history
         
-        # Calculate metrics
         metrics = calculate_tsp_metrics(
-            best_tour, best_fitness, dist_matrix,
+            best_overall_tour, best_overall_fitness, dist_matrix,
             known_optimal=known_optimal,
-            convergence_history=ga._history
+            convergence_history=best_overall_history,
+            computation_time=total_time,
+            multi_run_results=multi_run_results if n_runs > 1 else None
         )
         
         result = {
             "status": "success",
             "message": f"GA optimization completed for {n_cities}-city problem",
-            "best_tour": best_tour.tolist(),
-            "best_fitness": float(best_fitness),
+            "best_tour": best_overall_tour.tolist(),
+            "best_fitness": float(best_overall_fitness),
             "n_cities": n_cities,
             "generations_run": generations,
-            "convergence_history": ga._history[-20:],
+            "computation_time_seconds": float(total_time),
+            "convergence_history": best_overall_history[-20:] if best_overall_history else [],
             "metrics": metrics
         }
         
-        # Add summary message based on metrics
         if "performance_rating" in metrics:
-            result["message"] = f"GA optimization completed. Tour length: {best_fitness:.2f}, Gap: {metrics['optimality_gap_percentage']:.2f}% ({metrics['performance_rating']})"
+            result["message"] = f"GA completed. Tour: {best_overall_fitness:.2f}, Gap: {metrics['optimality_gap_percentage']:.2f}% ({metrics['performance_rating']}), Time: {total_time:.2f}s"
         
         return result
         
