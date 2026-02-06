@@ -1,7 +1,7 @@
 import numpy as np
 import uuid
 from typing import List, Optional, Any, Dict
-from pydantic import Field
+from pydantic import Field, BaseModel
 from langchain_core.tools import tool
 
 # In-memory model storage
@@ -241,7 +241,22 @@ class HopfieldNetwork:
         return self._energy(np.asarray(pattern))
 
 
-@tool
+
+class TrainHopfieldInput(BaseModel):
+    patterns: List[List[int]] = Field(description="Binary patterns to store as a 2D list of shape (n_patterns, n_neurons). Values must be -1 or 1")
+    max_iterations: int = Field(default=100, ge=50, le=500, description="Maximum iterations for pattern recall convergence")
+    threshold: float = Field(default=0.0, ge=-1.0, le=1.0, description="Neuron firing threshold")
+    async_update: bool = Field(default=True, description="Use asynchronous (random order) updates. More stable but slower")
+    energy_threshold: float = Field(default=1e-6, ge=1e-10, le=1e-3, description="Energy change threshold for convergence")
+
+
+class InferenceHopfieldInput(BaseModel):
+    model_id: str = Field(description="The unique model ID returned from train_hopfield_tool")
+    pattern: List[int] = Field(description="Input pattern as a 1D list of values (-1 or 1). Can be noisy/partial")
+    original_pattern: Optional[List[int]] = Field(default=None, description="Optional original clean pattern for computing recall accuracy metrics")
+
+
+@tool(args_schema=TrainHopfieldInput)
 def train_hopfield_tool(
     patterns: List[List[int]] = Field(description="Binary patterns to store as a 2D list of shape (n_patterns, n_neurons). Values must be -1 or 1"),
     max_iterations: int = Field(default=100, ge=50, le=500, description="Maximum iterations for pattern recall convergence"),
@@ -257,10 +272,10 @@ def train_hopfield_tool(
     them even when given partial or noisy inputs.
     
     **When to use:**
-    - Pattern completion (recovering full pattern from partial input)
+    - Pattern completion
     - Error correction in binary codes
     - Associative memory applications
-    - Optimization problems (when cast as energy minimization)
+    - Optimization problems cast as min energy
     
     **Capacity and limitations:**
     - Storage capacity: ~0.14 * n_neurons reliable patterns
@@ -273,38 +288,15 @@ def train_hopfield_tool(
     - For images: flatten to 1D array, threshold to {-1, 1}
     - Pattern length determines number of neurons
     
-    **Example use cases:**
-    - Store letter images (e.g., 7x7 = 49 neuron network for alphabet)
-    - Store binary codewords for error correction
-    - Store prototype patterns for classification
-    
-    Args:
-        patterns: Binary patterns to store, shape (n_patterns, n_neurons).
-            Each inner list is one pattern with values -1 or 1.
-        max_iterations: Max updates during recall (50-500). Default: 100.
-        threshold: Firing threshold for neurons (-1.0 to 1.0). Default: 0.0.
-        async_update: Use asynchronous updates (recommended). Default: True.
-        energy_threshold: Convergence criterion. Default: 1e-6.
-    
     Returns:
         Dict containing:
-            - model_id (str): Unique identifier for the trained network
-            - status (str): "success" or "error"
-            - message (str): Status message
-            - n_patterns (int): Number of stored patterns
-            - n_neurons (int): Number of neurons (pattern length)
-            - capacity (int): Estimated reliable storage capacity
-            - pattern_energies (List[float]): Energy of each stored pattern
-    
-    Example:
-        >>> # Store 3 simple patterns
-        >>> patterns = [
-        ...     [1, 1, -1, -1, 1, 1, -1, -1],  # Pattern A
-        ...     [-1, -1, 1, 1, -1, -1, 1, 1],  # Pattern B
-        ...     [1, -1, 1, -1, 1, -1, 1, -1],  # Pattern C
-        ... ]
-        >>> result = train_hopfield_tool(patterns=patterns)
-        >>> print(f"Stored {result['n_patterns']} patterns in {result['n_neurons']} neurons")
+            - model_id: Unique identifier for the trained network
+            - status: "success" or "error"
+            - message: Status message
+            - n_patterns: Number of stored patterns
+            - n_neurons: Number of neurons (pattern length)
+            - capacity: Estimated reliable storage capacity
+            - pattern_energies: Energy of each stored pattern
     """
     try:
         P = np.array(patterns)
@@ -354,11 +346,11 @@ def train_hopfield_tool(
         return {"status": "error", "message": str(e)}
 
 
-@tool
+@tool(args_schema=InferenceHopfieldInput)
 def inference_hopfield_tool(
-    model_id: str = Field(description="The unique model ID returned from train_hopfield_tool"),
-    pattern: List[int] = Field(description="Input pattern as a 1D list of values (-1 or 1). Can be noisy/partial"),
-    original_pattern: Optional[List[int]] = Field(default=None, description="Optional original clean pattern for computing recall accuracy metrics")
+    model_id: str,
+    pattern: List[int],
+    original_pattern: Optional[List[int]] = None,
 ) -> Dict[str, Any]:
     """
     Recall a stored pattern from a (possibly corrupted) input using a trained Hopfield Network.
@@ -382,34 +374,16 @@ def inference_hopfield_tool(
     - recalled_pattern: The stable state the network converged to
     - input_energy vs output_energy: Lower output energy means more stable result
     - n_different: How many bits changed from input to output
-    
-    Args:
-        model_id: Unique identifier from train_hopfield_tool.
-        pattern: Input pattern as a 1D list with values -1 or 1.
-            Length must match the stored patterns.
-    
+
     Returns:
         Dict containing:
-            - status (str): "success" or "error"
-            - message (str): Status message
-            - recalled_pattern (List[int]): The recalled/corrected pattern
-            - input_energy (float): Energy of the input pattern
-            - output_energy (float): Energy of the recalled pattern
-            - n_different (int): Number of bits that changed
-            - metrics (Dict[str, Any]) Metrics when original_pattern is provided:
-                - Recall accuracy: Percentage of bits matching the original
-                - Correction rate: Percentage of corrupted bits that were fixed
-                - Spurious state detection: Whether the recall converged to a non-stored pattern
-    
-    Example:
-        >>> # Recall with 20% noise
-        >>> noisy_input = [1, 1, 1, -1, 1, 1, -1, -1]  # Some bits flipped
-        >>> result = inference_hopfield_tool(
-        ...     model_id="hopfield_abc12345",
-        ...     pattern=noisy_input
-        ... )
-        >>> print(f"Corrected {result['n_different']} bits")
-        >>> print(f"Recalled: {result['recalled_pattern']}")
+            - status: "success" or "error"
+            - message: Status message
+            - recalled_pattern: The recalled/corrected pattern
+            - input_energy: Energy of the input pattern
+            - output_energy: Energy of the recalled pattern
+            - n_different: Number of bits that changed
+            - metrics: Metrics when original_pattern is provided
     """
     try:
         if model_id not in MODEL_STORE:
