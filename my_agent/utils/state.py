@@ -47,6 +47,7 @@ class AgentState(TypedDict):
     iteration_count: int
     should_replan: bool
     model_store: Dict[str, str]  # e.g., {"perceptron": "model_id_123", ...}
+    data_store: Dict[str, Any]   # e.g., {"$DATA.distance_matrix": [[...]], "$DATA.X_train": [[...]], ...}
 
 
 def create_initial_state(user_input: str) -> AgentState:
@@ -61,5 +62,6 @@ def create_initial_state(user_input: str) -> AgentState:
         execution_result=None,
         iteration_count=0,
         should_replan=False,
-        model_store={}
+        model_store={},
+        data_store={}
     )
