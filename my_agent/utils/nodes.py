@@ -4,6 +4,8 @@ import numpy as np
 from typing import Dict, Any
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, ToolMessage
+from .tools.memory import retrieve_memories, add_memory, add_model_training_memory, clear_all_memories, format_memories_for_prompt
+
 
 from .state import PlanExecutionState, Plan, PlanStep, AgentExecutorState
 from .prompts.planner_sys_prompt import PLANNER_SYSTEM_PROMPT
@@ -76,14 +78,16 @@ def _resolve_data_references(args: dict, data_store: dict, model_store: dict) ->
 # 2.  Lazy LLM
 # ============================================================================
 
-def _get_llm(temperature: float = 0, model_env: str = "MODEL_NAME") -> ChatOpenAI:
+def _get_llm(temperature: float = 0, model_env: str = "MODEL_NAME", inject_memory: bool = False, memory_query: str = "") -> ChatOpenAI:
     """Create a ChatOpenAI instance.  Safe to call after load_dotenv()."""
-    return ChatOpenAI(
+    llm = ChatOpenAI(
         model=os.environ.get(model_env, os.environ.get("MODEL_NAME")),
         openai_api_key=os.environ.get("API_KEY"),
         openai_api_base=os.environ.get("API_BASE_URL"),
         temperature=temperature,
     )
+    llm_with_memory = llm.bind_tools()
+    return llm_with_memory
 
 
 def get_planner_model():
@@ -100,6 +104,23 @@ def get_replanner_model():
     """Return replanner LLM bound to planner tools (for data re-reading)."""
     return _get_llm(temperature=0, model_env="MODEL_NAME")
 
+# ============================================================================
+# Helper: Inject Memory Context
+# ============================================================================
+
+def inject_memory_context(messages: list, query: str, system_prompt: str, k: int = 3) -> list:
+    """Inject relevant memories into the message list."""
+    relevant_memories = retrieve_memories(query, k=k)
+    memory_context = format_memories_for_prompt(relevant_memories)
+    
+    # Add or update system message with memory context
+    if not any(isinstance(m, SystemMessage) for m in messages):
+        enhanced_prompt = system_prompt
+        if memory_context:
+            enhanced_prompt = f"{system_prompt}\n\n{memory_context}"
+        return [SystemMessage(content=enhanced_prompt)] + messages
+    
+    return messages
 
 # ============================================================================
 # 3.  Executor sub-graph nodes  (mini ReAct)
@@ -111,6 +132,17 @@ def call_executor(state: AgentExecutorState) -> dict:
 
     if not any(isinstance(m, SystemMessage) for m in messages):
         messages = [SystemMessage(content=EXECUTOR_SYSTEM_PROMPT)] + messages
+        
+    step_description = state.get("step_description", "")
+    user_task = state.get("user_task", "")
+    tool_name = state["step_tool_name"]
+    memory_query = f"{user_task} {step_description} {tool_name}"
+    messages = inject_memory_context(
+        messages=messages,
+        query=memory_query,
+        system_prompt=EXECUTOR_SYSTEM_PROMPT,
+        k=3
+    )
 
     # Check if tool has already been called (tool result exists in messages)
     tool_already_called = any(
@@ -127,6 +159,18 @@ def call_executor(state: AgentExecutorState) -> dict:
         )
 
     response = executor_model.invoke(messages)
+    
+    if hasattr(response, 'content') and response.content:
+        add_memory(
+            content=f"Tool: {tool_name}\nTask: {step_description}\nResult: {response.content[:300]}",
+            metadata={
+                "tool": tool_name,
+                "step": step_description,
+                "task": user_task
+            },
+            memory_type="execution"
+        )
+        
     return {"messages": [response]}
 
 
@@ -153,9 +197,20 @@ def plan_step(state: PlanExecutionState) ->PlanExecutionState:
     4. Creates step-by-step execution plan
     """
     user_input = state["input"]
+    
+    # === MEMORY INJECTION ===
+    # Retrieve relevant past plans and solutions
+    relevant_memories = retrieve_memories(user_input, k=5)
+    memory_context = format_memories_for_prompt(relevant_memories)
+    
+    # Enhance system prompt with memory context
+    enhanced_system_prompt = PLANNER_SYSTEM_PROMPT
+    if memory_context:
+        enhanced_system_prompt = f"{PLANNER_SYSTEM_PROMPT}\n\n{memory_context}"
+    # === END MEMORY INJECTION ===
 
     planner_llm = get_planner_model()
-
+    
     message = [
         SystemMessage(content=PLANNER_SYSTEM_PROMPT),
         HumanMessage(content=f"""Analyze this problem and create an execution plan:
@@ -194,6 +249,24 @@ Consider:
             backup_method=plan_dict.get("backup_method"),
             confidence=plan_dict.get("confidence", 0.5)
         )
+        
+        # === STORE PLAN MEMORY ===
+        add_memory(
+            content=f"""Problem: {user_input[:300]}
+Problem Type: {plan.problem_type}
+Selected Method: {plan.selected_method}
+Reasoning: {plan.reasoning}
+Steps: {len(steps)} steps planned
+Confidence: {plan.confidence}""",
+            metadata={
+                "problem_type": plan.problem_type,
+                "method": plan.selected_method,
+                "num_steps": len(steps),
+                "confidence": plan.confidence
+            },
+            memory_type="plan"
+        )
+        # === END STORAGE ===
 
     except (json.JSONDecodeError, KeyError) as e:
         plan = Plan(
@@ -308,6 +381,15 @@ def execute_step(state: PlanExecutionState, executor_graph) -> PlanExecutionStat
         if isinstance(result, dict) and 'model_id' in result:
             method_key = step.tool_name.replace('train_', '').replace('_tool', '')
             new_model_store[method_key] = result['model_id']
+            
+            # === STORE MODEL TRAINING MEMORY ===
+            add_model_training_memory(
+                model_type=method_key,
+                purpose=step.description,
+                parameters=args,
+                result_summary=str(result.get('metrics', result))[:300]
+            )
+            # === END STORAGE ===
 
         # ---- Store data from data-loading tools ----
         if step.tool_name in DATA_LOADING_TOOLS and isinstance(result, dict):
@@ -351,19 +433,28 @@ def replan_step(state: PlanExecutionState) -> PlanExecutionState:
     past_steps = state.get("past_steps", [])
     current_index = state["current_step_index"]
     
-    # Check if all steps are complete
     all_steps_done = plan is None or current_index >= len(plan.steps)
     
-    # Build evaluation prompt
     steps_summary = "\n".join([
         f"Step {step.step_id}: {step.description}\nResult: {json.dumps(result, default=str)[:200]}"
-        for step, result in past_steps[-3:]  # Last 3 steps
+        for step, result in past_steps[-3:]
     ])
 
     metrics_summary = ""
     for step, result in past_steps:
         if isinstance(result, dict) and 'metrics' in result:
             metrics_summary += f"\nMetrics from {step.tool_name}: {json.dumps(result['metrics'], default=str)}"
+    
+    # === MEMORY INJECTION ===
+    # Search for similar completed tasks to guide replanning
+    memory_query = f"{state['input'][:200]} {plan.selected_method if plan else ''} results evaluation"
+    relevant_memories = retrieve_memories(memory_query, k=3)
+    memory_context = format_memories_for_prompt(relevant_memories)
+    
+    enhanced_system_prompt = REPLANNER_SYSTEM_PROMPT
+    if memory_context:
+        enhanced_system_prompt = f"{REPLANNER_SYSTEM_PROMPT}\n\n{memory_context}"
+    # === END MEMORY INJECTION ===
     
     eval_prompt = f"""Evaluate the execution progress:
 
@@ -386,12 +477,10 @@ If completing, provide a comprehensive Results Analysis following the format in 
 
     replanner_llm = get_replanner_model()
     messages = [
-        SystemMessage(content=REPLANNER_SYSTEM_PROMPT),
+        SystemMessage(content=enhanced_system_prompt),  # Use enhanced prompt
         HumanMessage(content=eval_prompt)
     ]
 
-    # history = state["messages"][-10:-1]
-    # response = replanner_llm.invoke(messages + history)
     response = replanner_llm.invoke(messages)
     
     try:
@@ -408,11 +497,27 @@ If completing, provide a comprehensive Results Analysis following the format in 
         final_response = decision_dict.get("final_response")
         
     except (json.JSONDecodeError, KeyError):
-        # Default to continue if parsing fails
         decision = "complete" if all_steps_done else "continue"
         final_response = response.content if all_steps_done else None
     
-    # Update state based on decision
+    # === STORE FINAL RESULT MEMORY ===
+    if decision == "complete" and final_response:
+        add_memory(
+            content=f"""Problem: {state['input'][:300]}
+Method: {plan.selected_method if plan else 'unknown'}
+Completed Steps: {len(past_steps)}
+Metrics: {metrics_summary[:500] if metrics_summary else 'No metrics'}
+Final Result: {final_response[:500]}""",
+            metadata={
+                "problem_type": plan.problem_type if plan else "unknown",
+                "method": plan.selected_method if plan else "unknown",
+                "num_steps": len(past_steps),
+                "decision": decision
+            },
+            memory_type="complete_execution"
+        )
+    # === END STORAGE ===
+    
     should_continue = decision in ["continue", "adjust"]
     
     new_messages = [AIMessage(content=f"Replanner decision: {decision}")]
@@ -423,7 +528,7 @@ If completing, provide a comprehensive Results Analysis following the format in 
         "final_response": final_response,
         "iteration_count": state.get("iteration_count", 0) + 1
     }
-
+    
 def should_continue(state: PlanExecutionState) -> str:
     """
     decide whether to continue execution or end.
@@ -439,3 +544,14 @@ def should_continue(state: PlanExecutionState) -> str:
         return "continue"
 
     return "end"
+
+def store_final_result(user_task: str, final_response: str):
+    """Store the complete interaction after task completion."""
+    add_memory(
+        content=f"User Task: {user_task}\n\nFinal Result: {final_response}",
+        metadata={
+            "task": user_task,
+            "response_preview": final_response[:200]
+        },
+        memory_type="complete_interaction"
+    )

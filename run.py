@@ -6,7 +6,7 @@ from IPython.display import Image, display
 
 from my_agent.agent import build_graph
 from my_agent.utils.state import create_initial_state
-
+from my_agent.utils.nodes import store_final_result
 
 def visualize_graph(app, path: str = "graph.png"):
     try:
@@ -147,6 +147,7 @@ def run_interactive(app):
             print("═" * 50)
             
             if final_state:
+                store_final_result(user_input, final_state["final_response"])
                 if final_state.get("final_response"):
                     print(final_state["final_response"])
                 elif final_state.get("past_steps"):
@@ -168,7 +169,7 @@ def run_interactive(app):
             state_after = app.get_state(config)
             if state_after and state_after.values.get("messages"):
                 print(f"\n📝 Total messages in history: {len(state_after.values['messages'])}")
-            
+                
             print("═" * 50)
             
         except KeyboardInterrupt:

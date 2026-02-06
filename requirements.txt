@@ -1,6 +1,11 @@
 langgraph
 langchain-core
 langchain-openai
+langchain-chroma 
+langchain
 numpy
 ipython
 python-dotenv
+chromadb 
+pandas
+scikit-learn
