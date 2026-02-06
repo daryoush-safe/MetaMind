@@ -1,7 +1,8 @@
+from pydantic import BaseModel, Field
 from typing import Annotated, Optional, Sequence, TypedDict, List, Any, Dict
+
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, ToolMessage, SystemMessage
 from langgraph.graph.message import add_messages
-from pydantic import BaseModel, Field
 
 
 class PlanStep(BaseModel):
@@ -36,7 +37,16 @@ class ExecutionResult(BaseModel):
     recommendations: List[str] = Field(default_factory=list)
 
 
-class AgentState(TypedDict):
+class AgentExecutorState(TypedDict):
+    """Executor mini-ReAct state."""
+    messages: Annotated[Sequence[BaseMessage], add_messages]
+    current_step: Optional[Dict[str, Any]]
+    model_store: Dict[str, str]
+    step_tool_name: str
+    step_result: Optional[Dict[str, Any]]
+
+
+class PlanExecutionState(TypedDict):
     messages: Annotated[Sequence[BaseMessage], add_messages]
     input: str
     plan: List[str]
@@ -47,11 +57,12 @@ class AgentState(TypedDict):
     iteration_count: int
     should_replan: bool
     model_store: Dict[str, str]  # e.g., {"perceptron": "model_id_123", ...}
+    data_store: Dict[str, Any]   # e.g., {"$DATA.distance_matrix": [[...]], "$DATA.X_train": [[...]], ...}
 
 
-def create_initial_state(user_input: str) -> AgentState:
+def create_initial_state(user_input: str) -> PlanExecutionState:
     """Create initial state from user input."""
-    return AgentState(
+    return PlanExecutionState(
         messages=[HumanMessage(content=user_input)],
         input=user_input,
         plan=None,
@@ -61,5 +72,6 @@ def create_initial_state(user_input: str) -> AgentState:
         execution_result=None,
         iteration_count=0,
         should_replan=False,
-        model_store={}
+        model_store={},
+        data_store={}
     )

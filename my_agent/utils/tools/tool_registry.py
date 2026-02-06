@@ -13,6 +13,8 @@ from .gp import train_gp_tool
 from .gp import inference_gp_tool
 from .aco import aco_tool
 from .pso import pso_tool
+from .tsp import read_tsp_file
+from .csv import read_and_preprocess_csv
 
 
 ALL_TOOLS = [
@@ -31,4 +33,20 @@ ALL_TOOLS = [
     inference_gp_tool,
     aco_tool,
     pso_tool,
+    read_tsp_file,
+    read_and_preprocess_csv,
 ]
+
+
+DATA_LOADING_TOOLS = {"read_tsp_file", "read_and_preprocess_csv"}
+
+
+DATA_TOOL_OUTPUT_KEYS = {
+    "read_tsp_file": [
+        "distance_matrix", "dimension", "city_coords", "name", "comment", "edge_weight_type"
+    ],
+    "read_and_preprocess_csv": [
+        "X_train", "y_train", "X_test", "y_test", "feature_names",
+        "n_samples", "n_features", "target_column", "class_names", "label_encoded"
+    ],
+}

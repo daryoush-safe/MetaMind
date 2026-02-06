@@ -1,0 +1,12 @@
+NAME : small5
+COMMENT : Small 5-city example
+TYPE : TSP
+DIMENSION : 5
+EDGE_WEIGHT_TYPE : EUC_2D
+NODE_COORD_SECTION
+1 0 0
+2 0 3
+3 4 3
+4 4 0
+5 2 1
+EOF

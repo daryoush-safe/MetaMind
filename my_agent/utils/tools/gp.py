@@ -3,7 +3,7 @@ import copy
 import random
 import uuid
 from typing import List, Optional, Any, Dict, Callable
-from pydantic import Field
+from pydantic import Field, BaseModel
 from langchain_core.tools import tool
 
 # In-memory model storage
@@ -278,18 +278,37 @@ class GeneticProgramming:
         return np.array([self._best_program.evaluate(xi) for xi in X])
 
 
-@tool
-def train_gp_tool(
-    X_train: List[float] = Field(description="Training input values as a 1D list (for single-variable symbolic regression)"),
-    y_train: List[float] = Field(description="Training target values as a 1D list"),
-    population_size: int = Field(default=200, ge=100, le=1000, description="Number of individuals in population"),
-    generations: int = Field(default=50, ge=20, le=200, description="Number of evolutionary generations"),
-    max_depth: int = Field(default=6, ge=3, le=10, description="Maximum depth of expression trees"),
-    crossover_rate: float = Field(default=0.9, ge=0.7, le=0.95, description="Probability of crossover"),
-    mutation_rate: float = Field(default=0.1, ge=0.05, le=0.2, description="Probability of mutation"),
-    function_set: List[str] = Field(default=["+", "-", "*", "/"], description="Available operators: +, -, *, /, sin, cos, exp"),
-    terminal_set: List[str] = Field(default=["x", "constants"], description="Terminal symbols: 'x' for variable, 'constants' for random constants"),
+class TrainGPInput(BaseModel):
+    X_train: List[float] = Field(description="Training input values as a 1D list (for single-variable symbolic regression)")
+    y_train: List[float] = Field(description="Training target values as a 1D list")
+    population_size: int = Field(default=200, ge=100, le=1000, description="Number of individuals in population")
+    generations: int = Field(default=50, ge=20, le=200, description="Number of evolutionary generations")
+    max_depth: int = Field(default=6, ge=3, le=10, description="Maximum depth of expression trees")
+    crossover_rate: float = Field(default=0.9, ge=0.7, le=0.95, description="Probability of crossover")
+    mutation_rate: float = Field(default=0.1, ge=0.05, le=0.2, description="Probability of mutation")
+    function_set: List[str] = Field(default=["+", "-", "*", "/"], description="Available operators: +, -, *, /, sin, cos, exp")
+    terminal_set: List[str] = Field(default=["x", "constants"], description="Terminal symbols: 'x' for variable, 'constants' for random constants")
     parsimony_coefficient: float = Field(default=0.001, ge=0, le=0.01, description="Penalty for tree size (bloat control)")
+
+
+class InferenceGPInput(BaseModel):
+    model_id: str = Field(description="The unique model ID returned from train_gp_tool"),
+    X_test: List[float] = Field(description="Test input values as a 1D list"),
+    y_true: Optional[List[float]] = Field(default=None, description="Optional ground truth values for computing regression metrics")
+
+
+@tool(args_schema=TrainGPInput)
+def train_gp_tool(
+    X_train: List[float],
+    y_train: List[float],
+    population_size: int = 200,
+    generations: int = 50,
+    max_depth: int = 6,
+    crossover_rate: float = 0.9,
+    mutation_rate: float = 0.1,
+    function_set: List[str] = ["+", "-", "*", "/"],
+    terminal_set: List[str] = ["x", "constants"],
+    parsimony_coefficient: float = 0.001,
 ) -> Dict[str, Any]:
     """
     Train Genetic Programming for symbolic regression.
@@ -315,33 +334,14 @@ def train_gp_tool(
     - max_depth: Deeper trees = more complex expressions
     - parsimony_coefficient: Higher = simpler expressions (bloat control)
     
-    Args:
-        X_train: Input values (1D list for single-variable regression).
-        y_train: Target values to fit.
-        population_size: Population size (100-1000). Default: 200.
-        generations: Evolution generations (20-200). Default: 50.
-        max_depth: Max tree depth (3-10). Default: 6.
-        crossover_rate: Crossover probability (0.7-0.95). Default: 0.9.
-        mutation_rate: Mutation probability (0.05-0.2). Default: 0.1.
-        function_set: Available operators. Default: ["+", "-", "*", "/"].
-        terminal_set: Terminal symbols. Default: ["x", "constants"].
-        parsimony_coefficient: Size penalty (0-0.01). Default: 0.001.
-    
     Returns:
         Dict containing:
-            - model_id (str): Unique identifier
-            - status (str): "success" or "error"
-            - expression (str): Human-readable evolved formula
-            - mse (float): Mean squared error on training data
-            - tree_size (int): Number of nodes in expression
-            - tree_depth (int): Depth of expression tree
-    
-    Example:
-        >>> # Discover formula for y = x^2 + 2*x + 1
-        >>> X = [i/10 for i in range(-50, 51)]
-        >>> y = [x**2 + 2*x + 1 for x in X]
-        >>> result = train_gp_tool(X_train=X, y_train=y, generations=100)
-        >>> print(result['expression'])  # Something like: ((x * x) + ((x * 2.0) + 1.0))
+            - model_id: Unique identifier
+            - status: "success" or "error"
+            - expression: Human-readable evolved formula
+            - mse: Mean squared error on training data
+            - tree_size: Number of nodes in expression
+            - tree_depth: Depth of expression tree
     """
     try:
         X = np.array(X_train)
@@ -389,36 +389,24 @@ def train_gp_tool(
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
-@tool
+@tool(args_schema=InferenceGPInput)
 def inference_gp_tool(
-    model_id: str = Field(description="The unique model ID returned from train_gp_tool"),
-    X_test: List[float] = Field(description="Test input values as a 1D list"),
-    y_true: Optional[List[float]] = Field(default=None, description="Optional ground truth values for computing regression metrics")
+    model_id: str,
+    X_test: List[float],
+    y_true: Optional[List[float]] = None,
 ) -> Dict[str, Any]:
     """
     Make predictions using an evolved GP expression.
     
     Evaluates the discovered mathematical expression on new input values.
     
-    Args:
-        model_id: Unique identifier from train_gp_tool.
-        X_test: Input values to evaluate (1D list).
-    
     Returns:
         Dict containing:
-            - status (str): "success" or "error"
-            - predictions (List[float]): Predicted output values
-            - expression (str): The formula being evaluated
-            - n_samples (int): Number of predictions
-            - metrics (Dict[str, Any]): when y_true is provided:
-                - MSE, RMSE, MAE, R², MAPE
-    
-    Example:
-        >>> result = inference_gp_tool(
-        ...     model_id="gp_abc12345",
-        ...     X_test=[0, 1, 2, 3, 4, 5]
-        ... )
-        >>> print(result['predictions'])
+            - status: "success" or "error"
+            - predictions: Predicted output values
+            - expression: The formula being evaluated
+            - n_samples: Number of predictions
+            - metrics: when y_true is provided
     """
     try:
         if model_id not in MODEL_STORE:
