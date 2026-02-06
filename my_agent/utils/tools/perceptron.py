@@ -8,16 +8,26 @@ from langchain_core.tools import tool
 MODEL_STORE: Dict[str, Any] = {}
 
 
-def calculate_classification_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, Any]:
+def calculate_classification_metrics(y_true: np.ndarray, y_pred: np.ndarray,
+                                      y_scores: Optional[np.ndarray] = None) -> Dict[str, Any]:
     """
-    Calculate classification metrics for binary classification.
+    Calculate comprehensive classification metrics for binary classification.
+    
+    Metrics computed:
+        - Accuracy: (TP + TN) / Total
+        - Precision: TP / (TP + FP)
+        - Recall: TP / (TP + FN)
+        - F1 Score: 2 * (Precision * Recall) / (Precision + Recall)
+        - AUC-ROC: Area under ROC curve (when y_scores provided)
+        - Confusion Matrix: [[TN, FP], [FN, TP]]
     
     Args:
         y_true: Ground truth labels (0 or 1)
         y_pred: Predicted labels (0 or 1)
+        y_scores: Predicted scores/probabilities for AUC-ROC computation
     
     Returns:
-        Dictionary with accuracy, precision, recall, f1_score, confusion_matrix
+        Dictionary with comprehensive classification metrics
     """
     y_true = np.asarray(y_true).flatten()
     y_pred = np.asarray(y_pred).flatten()
@@ -28,18 +38,28 @@ def calculate_classification_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> 
     fp = np.sum((y_true == 0) & (y_pred == 1))
     fn = np.sum((y_true == 1) & (y_pred == 0))
     
-    # Metrics
+    # --- Accuracy ---
     accuracy = (tp + tn) / (tp + tn + fp + fn) if (tp + tn + fp + fn) > 0 else 0.0
+    
+    # --- Precision ---
     precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+    
+    # --- Recall ---
     recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+    
+    # --- F1 Score ---
     f1_score = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
     
-    return {
+    # --- Confusion Matrix: [[TN, FP], [FN, TP]] ---
+    confusion_matrix = [[int(tn), int(fp)], [int(fn), int(tp)]]
+    
+    result = {
         "accuracy": float(accuracy),
         "precision": float(precision),
         "recall": float(recall),
         "f1_score": float(f1_score),
-        "confusion_matrix": {
+        "confusion_matrix": confusion_matrix,
+        "confusion_matrix_detail": {
             "true_positives": int(tp),
             "true_negatives": int(tn),
             "false_positives": int(fp),
@@ -48,6 +68,122 @@ def calculate_classification_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> 
         "total_samples": int(len(y_true)),
         "correct_predictions": int(tp + tn),
         "incorrect_predictions": int(fp + fn)
+    }
+    
+    # --- AUC-ROC (when continuous scores are available) ---
+    if y_scores is not None:
+        y_scores = np.asarray(y_scores).flatten()
+        auc_roc = _compute_auc_roc(y_true, y_scores)
+        result["auc_roc"] = float(auc_roc)
+    
+    return result
+
+
+def _compute_auc_roc(y_true: np.ndarray, y_scores: np.ndarray) -> float:
+    """
+    Compute AUC-ROC using the trapezoidal rule.
+    
+    Args:
+        y_true: Ground truth binary labels (0 or 1)
+        y_scores: Predicted scores/probabilities (continuous)
+    
+    Returns:
+        float: Area under the ROC curve (0.0 to 1.0)
+    """
+    # Sort by score descending
+    sorted_indices = np.argsort(-y_scores)
+    y_true_sorted = y_true[sorted_indices]
+    
+    n_pos = np.sum(y_true == 1)
+    n_neg = np.sum(y_true == 0)
+    
+    if n_pos == 0 or n_neg == 0:
+        return 0.0
+    
+    # Compute TPR and FPR at each threshold
+    tpr_list = [0.0]
+    fpr_list = [0.0]
+    tp_count = 0
+    fp_count = 0
+    
+    for i in range(len(y_true_sorted)):
+        if y_true_sorted[i] == 1:
+            tp_count += 1
+        else:
+            fp_count += 1
+        tpr_list.append(tp_count / n_pos)
+        fpr_list.append(fp_count / n_neg)
+    
+    # Trapezoidal integration
+    auc = 0.0
+    for i in range(1, len(fpr_list)):
+        auc += (fpr_list[i] - fpr_list[i-1]) * (tpr_list[i] + tpr_list[i-1]) / 2.0
+    
+    return auc
+
+
+def cross_validate_perceptron(X: np.ndarray, y: np.ndarray, k: int = 5,
+                                learning_rate: float = 0.01, max_epochs: int = 100,
+                                bias: bool = True) -> Dict[str, Any]:
+    """
+    Perform k-fold cross-validation for Perceptron.
+    
+    Args:
+        X: Feature matrix (n_samples, n_features)
+        y: Labels (n_samples,)
+        k: Number of folds
+        learning_rate: Perceptron learning rate
+        max_epochs: Max training epochs
+        bias: Whether to use bias
+    
+    Returns:
+        Dictionary with cross-validation results
+    """
+    n_samples = len(X)
+    indices = np.random.permutation(n_samples)
+    fold_size = n_samples // k
+    
+    fold_accuracies = []
+    fold_f1s = []
+    fold_precisions = []
+    fold_recalls = []
+    
+    for fold in range(k):
+        # Split into train and validation
+        val_start = fold * fold_size
+        val_end = val_start + fold_size if fold < k - 1 else n_samples
+        val_indices = indices[val_start:val_end]
+        train_indices = np.concatenate([indices[:val_start], indices[val_end:]])
+        
+        X_train_fold = X[train_indices]
+        y_train_fold = y[train_indices]
+        X_val_fold = X[val_indices]
+        y_val_fold = y[val_indices]
+        
+        # Train and predict
+        model = Perceptron(learning_rate=learning_rate, max_epochs=max_epochs, bias=bias)
+        model.fit(X_train_fold, y_train_fold)
+        y_pred_fold = model.predict(X_val_fold)
+        
+        # Compute metrics for this fold
+        fold_metrics = calculate_classification_metrics(y_val_fold, y_pred_fold)
+        fold_accuracies.append(fold_metrics["accuracy"])
+        fold_f1s.append(fold_metrics["f1_score"])
+        fold_precisions.append(fold_metrics["precision"])
+        fold_recalls.append(fold_metrics["recall"])
+    
+    return {
+        "k_folds": k,
+        "cv_accuracy_mean": float(np.mean(fold_accuracies)),
+        "cv_accuracy_std": float(np.std(fold_accuracies)),
+        "cv_f1_mean": float(np.mean(fold_f1s)),
+        "cv_f1_std": float(np.std(fold_f1s)),
+        "cv_precision_mean": float(np.mean(fold_precisions)),
+        "cv_precision_std": float(np.std(fold_precisions)),
+        "cv_recall_mean": float(np.mean(fold_recalls)),
+        "cv_recall_std": float(np.std(fold_recalls)),
+        "fold_accuracies": [float(a) for a in fold_accuracies],
+        "fold_f1_scores": [float(f) for f in fold_f1s]
     }
 
 
@@ -73,19 +209,6 @@ class Perceptron:
     """
     
     def __init__(self, learning_rate: float = 0.01, max_epochs: int = 100, bias: bool = True):
-        """
-        Initialize the Perceptron classifier.
-        
-        Args:
-            learning_rate (float): Step size for weight updates. Higher values
-                lead to faster but potentially unstable learning. Range: 0.001-0.1.
-                Default: 0.01.
-            max_epochs (int): Maximum number of iterations over the entire dataset.
-                Training stops early if the model converges. Range: 50-1000.
-                Default: 100.
-            bias (bool): Whether to include a bias term. The bias allows the
-                decision boundary to be offset from the origin. Default: True.
-        """
         self.learning_rate = learning_rate
         self.max_epochs = max_epochs
         self.use_bias = bias
@@ -104,13 +227,9 @@ class Perceptron:
         Args:
             X (np.ndarray): Training features of shape (n_samples, n_features).
             y (np.ndarray): Binary target labels of shape (n_samples,).
-                Values should be 0 or 1.
         
         Returns:
             Perceptron: The fitted model instance (self).
-        
-        Raises:
-            ValueError: If X and y have incompatible shapes.
         """
         X = np.asarray(X)
         y = np.asarray(y)
@@ -120,7 +239,6 @@ class Perceptron:
         
         n_samples, n_features = X.shape
         
-        # Initialize weights to zeros
         self.weights = np.zeros(n_features)
         self.bias_weight = 0.0
         self._training_history = []
@@ -128,15 +246,12 @@ class Perceptron:
         for epoch in range(self.max_epochs):
             errors = 0
             for i in range(n_samples):
-                # Calculate linear output
                 linear_output = np.dot(X[i], self.weights)
                 if self.use_bias:
                     linear_output += self.bias_weight
                 
-                # Heaviside step function activation
                 y_pred = 1 if linear_output >= 0 else 0
                 
-                # Perceptron update rule
                 update = self.learning_rate * (y[i] - y_pred)
                 
                 self.weights += update * X[i]
@@ -146,14 +261,12 @@ class Perceptron:
                 if update != 0:
                     errors += 1
             
-            # Track training progress
             self._training_history.append({
                 "epoch": epoch + 1,
                 "errors": errors,
                 "error_rate": errors / n_samples
             })
             
-            # Early stopping if converged (no misclassifications)
             if errors == 0:
                 break
         
@@ -161,18 +274,7 @@ class Perceptron:
         return self
 
     def predict(self, X: np.ndarray) -> np.ndarray:
-        """
-        Predict class labels for samples in X.
-        
-        Args:
-            X (np.ndarray): Feature matrix of shape (n_samples, n_features).
-        
-        Returns:
-            np.ndarray: Predicted class labels (0 or 1) of shape (n_samples,).
-        
-        Raises:
-            RuntimeError: If the model has not been fitted yet.
-        """
+        """Predict class labels for samples in X."""
         if not self._is_fitted:
             raise RuntimeError("Model must be fitted before making predictions. Call fit() first.")
         
@@ -181,6 +283,26 @@ class Perceptron:
         if self.use_bias:
             linear_output += self.bias_weight
         return np.where(linear_output >= 0, 1, 0)
+    
+    def decision_function(self, X: np.ndarray) -> np.ndarray:
+        """
+        Compute raw decision scores (linear output before thresholding).
+        Used for AUC-ROC computation.
+        
+        Args:
+            X: Feature matrix of shape (n_samples, n_features).
+        
+        Returns:
+            np.ndarray: Raw decision scores of shape (n_samples,).
+        """
+        if not self._is_fitted:
+            raise RuntimeError("Model must be fitted before computing decision function.")
+        
+        X = np.asarray(X)
+        linear_output = np.dot(X, self.weights)
+        if self.use_bias:
+            linear_output += self.bias_weight
+        return linear_output
     
     def get_params(self) -> Dict[str, Any]:
         """Return model parameters as a dictionary."""
@@ -195,28 +317,19 @@ class Perceptron:
 
 
 class TrainPerceptronInput(BaseModel):
-    X_train: List[List[float]] = Field(
-        description="Training feature matrix as a 2D list of shape (n_samples, n_features)",
-    )
-    y_train: List[int] = Field(
-        description="Training labels as a list of binary values (0 or 1)",
-    )
-    learning_rate: float = Field(
-        default=0.01,
-        ge=0.001,
-        le=0.1,
-        description="Learning rate for weight updates. Higher values mean faster but potentially unstable learning.",
-    )
-    max_epochs: int = Field(
-        default=100,
-        ge=50,
-        le=1000,
-        description="Maximum number of training iterations over the dataset.",
-    )
-    bias: bool = Field(
-        default=True,
-        description="Whether to include a bias term in the model.",
-    )
+    X_train: List[List[float]] = Field(description="Training feature matrix as a 2D list of shape (n_samples, n_features)")
+    y_train: List[int] = Field(description="Training labels as a list of binary values (0 or 1)")
+    learning_rate: float = Field(default=0.01, ge=0.001, le=0.1, description="Learning rate for weight updates.")
+    max_epochs: int = Field(default=100, ge=50, le=1000, description="Maximum number of training iterations over the dataset.")
+    bias: bool = Field(default=True, description="Whether to include a bias term in the model.")
+    cross_validate: bool = Field(default=False, description="Whether to perform k-fold cross-validation")
+    cv_folds: int = Field(default=5, ge=2, le=10, description="Number of folds for cross-validation")
+
+
+class InferencePerceptronInput(BaseModel):
+    model_id: str = Field(description="The unique model ID returned from train_perceptron_tool")
+    X_test: List[List[float]] = Field(description="Test feature matrix as a 2D list of shape (n_samples, n_features)")
+    y_true: Optional[List[int]] = Field(default=None, description="Optional ground truth labels for computing metrics (list of 0s and 1s)")
 
 
 @tool(args_schema=TrainPerceptronInput)
@@ -226,67 +339,42 @@ def train_perceptron_tool(
     learning_rate: float = 0.01,
     max_epochs: int = 100,
     bias: bool = True,
+    cross_validate: bool = False,
+    cv_folds: int = 5,
 ) -> Dict[str, Any]:
     """
     Train a Perceptron classifier on the provided dataset.
     
     The Perceptron is a fundamental neural network unit suitable for linearly
-    separable binary classification problems. It learns a linear decision boundary
-    using the Perceptron Learning Rule.
+    separable binary classification problems.
     
     **When to use:**
     - Binary classification tasks
     - When data is linearly separable or nearly so
-    - When interpretability is important (weights directly show feature importance)
+    - When interpretability is important
     - As a baseline before trying more complex models
     
-    **Limitations:**
-    - Cannot solve non-linearly separable problems (e.g., XOR)
-    - Only supports binary classification
-    - May not converge if data is not linearly separable
-    
-    **Parameters Guide:**
-    - learning_rate: Start with 0.01. Increase to 0.1 for faster training or
-      decrease to 0.001 for more stable convergence.
-    - max_epochs: 100 is usually sufficient for small datasets. Increase for
-      larger or more complex datasets.
-    - bias: Keep True unless you specifically want the decision boundary to
-      pass through the origin.
-    
-    Args:
-        X_train: Training feature matrix as a 2D list. Each inner list represents
-            one sample's features.
-        y_train: Training labels as a list of binary values (0 or 1).
-        learning_rate: Step size for weight updates (0.001-0.1). Default: 0.01.
-        max_epochs: Maximum training iterations (50-1000). Default: 100.
-        bias: Whether to include a bias term. Default: True.
-    
+    **Metrics computed (on inference with y_true):**
+    - Accuracy: (TP + TN) / Total
+    - Precision: TP / (TP + FP)
+    - Recall: TP / (TP + FN)
+    - F1 Score: 2 * (Precision * Recall) / (Precision + Recall)
+    - AUC-ROC: Area under ROC curve
+    - Confusion Matrix: [[TN, FP], [FN, TP]]
+    - Cross-Validation Score: Mean accuracy across k folds (when enabled)
+
     Returns:
         Dict containing:
-            - model_id (str): Unique identifier for the trained model
-            - status (str): "success" or "error"
-            - message (str): Status message
-            - weights (List[float]): Learned feature weights
-            - bias_weight (float): Learned bias term
-            - n_features (int): Number of input features
-            - n_samples (int): Number of training samples
-            - converged (bool): Whether training converged
-            - epochs_run (int): Actual number of epochs run
-    
-    Example:
-        >>> result = train_perceptron_tool(
-        ...     X_train=[[0, 0], [0, 1], [1, 0], [1, 1]],
-        ...     y_train=[0, 0, 0, 1],
-        ...     learning_rate=0.1,
-        ...     max_epochs=100
-        ... )
-        >>> print(result['model_id'])  # Use this ID for inference
+            - model_id: Unique identifier for the trained model
+            - status: "success" or "error"
+            - weights: Learned feature weights
+            - converged: Whether training converged
+            - cross_validation: CV results (when cross_validate=True)
     """
     try:
         X = np.array(X_train)
         y = np.array(y_train)
         
-        # Validate inputs
         if len(X.shape) != 2:
             return {"status": "error", "message": "X_train must be a 2D array"}
         if len(y.shape) != 1:
@@ -294,7 +382,6 @@ def train_perceptron_tool(
         if X.shape[0] != y.shape[0]:
             return {"status": "error", "message": f"X_train and y_train must have same number of samples"}
         
-        # Create and train model
         model = Perceptron(
             learning_rate=learning_rate,
             max_epochs=max_epochs,
@@ -302,14 +389,12 @@ def train_perceptron_tool(
         )
         model.fit(X, y)
         
-        # Store model with unique ID
         model_id = f"perceptron_{uuid.uuid4().hex[:8]}"
         MODEL_STORE[model_id] = model
         
-        # Check convergence
         converged = len(model._training_history) < max_epochs or model._training_history[-1]["errors"] == 0
         
-        return {
+        result = {
             "status": "success",
             "message": f"Perceptron trained successfully on {X.shape[0]} samples with {X.shape[1]} features",
             "model_id": model_id,
@@ -322,67 +407,53 @@ def train_perceptron_tool(
             "final_error_rate": model._training_history[-1]["error_rate"] if model._training_history else None
         }
         
+        # Cross-validation
+        if cross_validate:
+            cv_results = cross_validate_perceptron(
+                X, y, k=cv_folds,
+                learning_rate=learning_rate,
+                max_epochs=max_epochs,
+                bias=bias
+            )
+            result["cross_validation"] = cv_results
+            result["message"] += f". CV accuracy: {cv_results['cv_accuracy_mean']:.3f} +/- {cv_results['cv_accuracy_std']:.3f}"
+        
+        return result
+        
     except Exception as e:
         print("error during perceptron:", e)
         return {"status": "error", "message": str(e)}
 
 
-@tool
+@tool(args_schema=InferencePerceptronInput)
 def inference_perceptron_tool(
-    model_id: str = Field(description="The unique model ID returned from train_perceptron_tool"),
-    X_test: List[List[float]] = Field(description="Test feature matrix as a 2D list of shape (n_samples, n_features)"),
-    y_true: Optional[List[int]] = Field(default=None, description="Optional ground truth labels for computing metrics (list of 0s and 1s)")
+    model_id: str,
+    X_test: List[List[float]],
+    y_true: Optional[List[int]] = None,
 ) -> Dict[str, Any]:
     """
     Make predictions using a trained Perceptron model.
     
-    Uses a previously trained Perceptron model (identified by model_id) to
-    predict binary class labels for new samples.
-    
-    **Usage:**
-    1. First train a model using train_perceptron_tool to get a model_id
-    2. Use this tool with that model_id to make predictions
-    
     **Metrics (when y_true is provided):**
-    If ground truth labels are provided, the tool computes:
-    - Accuracy: Overall correctness
-    - Precision: True positives / (True positives + False positives)
-    - Recall: True positives / (True positives + False negatives)
-    - F1 Score: Harmonic mean of precision and recall
-    - Confusion Matrix: TP, TN, FP, FN counts
-    
-    Args:
-        model_id: The unique identifier returned from train_perceptron_tool.
-        X_test: Test feature matrix as a 2D list. Must have the same number
-            of features as the training data.
-        y_true: Optional ground truth labels for computing metrics.
+    - Accuracy: (TP + TN) / Total
+    - Precision: TP / (TP + FP)
+    - Recall: TP / (TP + FN)
+    - F1 Score: 2 * (Precision * Recall) / (Precision + Recall)
+    - AUC-ROC: Area under ROC curve
+    - Confusion Matrix: [[TN, FP], [FN, TP]]
     
     Returns:
         Dict containing:
-            - status (str): "success" or "error"
-            - message (str): Status message
-            - predictions (List[int]): Predicted class labels (0 or 1)
-            - n_samples (int): Number of samples predicted
-            - metrics (Dict): Classification metrics (only if y_true provided)
-    
-    Example:
-        >>> result = inference_perceptron_tool(
-        ...     model_id="perceptron_abc12345",
-        ...     X_test=[[0.5, 0.5], [1.0, 1.0]],
-        ...     y_true=[0, 1]  # Optional: for metrics
-        ... )
-        >>> print(result['predictions'])  # [0, 1]
-        >>> print(result['metrics']['accuracy'])  # 1.0
+            - predictions: Predicted class labels (0 or 1)
+            - metrics: Comprehensive classification metrics (when y_true provided)
     """
     try:
-        # Retrieve model
         if model_id not in MODEL_STORE:
             return {"status": "error", "message": f"Model '{model_id}' not found. Train a model first."}
         
         model = MODEL_STORE[model_id]
         X = np.array(X_test)
         
-        # Validate input dimensions
         if len(X.shape) != 2:
             return {"status": "error", "message": "X_test must be a 2D array"}
         if X.shape[1] != len(model.weights):
@@ -391,7 +462,6 @@ def inference_perceptron_tool(
                 "message": f"X_test has {X.shape[1]} features but model expects {len(model.weights)}"
             }
         
-        # Make predictions
         predictions = model.predict(X)
         
         result = {
@@ -407,9 +477,14 @@ def inference_perceptron_tool(
             if len(y_true_arr) != len(predictions):
                 return {"status": "error", "message": f"y_true length ({len(y_true_arr)}) must match X_test samples ({len(predictions)})"}
             
-            metrics = calculate_classification_metrics(y_true_arr, predictions)
+            # Get decision scores for AUC-ROC
+            y_scores = model.decision_function(X)
+            
+            metrics = calculate_classification_metrics(y_true_arr, predictions, y_scores=y_scores)
             result["metrics"] = metrics
             result["message"] = f"Successfully predicted {len(predictions)} samples with {metrics['accuracy']*100:.1f}% accuracy"
+            if "auc_roc" in metrics:
+                result["message"] += f", AUC-ROC: {metrics['auc_roc']:.3f}"
         
         return result
         

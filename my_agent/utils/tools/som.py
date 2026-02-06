@@ -1,7 +1,7 @@
 import numpy as np
 import uuid
 from typing import List, Tuple, Optional, Any, Dict, Literal
-from pydantic import Field
+from pydantic import Field, BaseModel
 from langchain_core.tools import tool
 
 # In-memory model storage
@@ -11,60 +11,72 @@ MODEL_STORE: Dict[str, Any] = {}
 def calculate_clustering_metrics(X: np.ndarray, labels: np.ndarray, 
                                   y_true: Optional[np.ndarray] = None) -> Dict[str, Any]:
     """
-    Calculate clustering quality metrics.
+    Calculate comprehensive clustering quality metrics.
+    
+    Internal metrics (no ground truth needed):
+        - Silhouette Score: Cohesion vs separation (-1 to 1, higher is better)
+        - Davies-Bouldin Index: Cluster similarity (lower is better)
+        - Calinski-Harabasz Index: Variance ratio (higher is better)
+        - Inertia: Within-cluster sum of squares (lower is better)
+    
+    External metrics (when true labels available):
+        - Adjusted Rand Index: Agreement with true labels (0 to 1)
+        - Normalized Mutual Information: Information shared with true labels (0 to 1)
+        - Purity: Fraction of correctly assigned samples
     
     Args:
         X: Data points of shape (n_samples, n_features)
-        labels: Cluster assignments (can be tuple indices flattened to integers)
+        labels: Cluster assignments
         y_true: Optional ground truth labels for external validation
     
     Returns:
-        Dictionary with clustering metrics
+        Dictionary with comprehensive clustering metrics
     """
     unique_labels = np.unique(labels)
     n_clusters = len(unique_labels)
     n_samples = len(X)
     
-    # Calculate cluster sizes
     cluster_sizes = {int(label): int(np.sum(labels == label)) for label in unique_labels}
     
-    # Calculate intra-cluster distances (compactness)
-    intra_distances = []
+    # Pre-compute centroids and cluster data
+    centroids = []
+    cluster_points_list = []
     for label in unique_labels:
         cluster_points = X[labels == label]
+        cluster_points_list.append(cluster_points)
+        centroids.append(np.mean(cluster_points, axis=0))
+    centroids = np.array(centroids)
+    global_centroid = np.mean(X, axis=0)
+    
+    # --- Inertia: Within-cluster sum of squares ---
+    inertia = 0.0
+    intra_distances = []
+    for i, label in enumerate(unique_labels):
+        cluster_points = cluster_points_list[i]
+        dists_sq = np.sum((cluster_points - centroids[i]) ** 2, axis=1)
+        inertia += np.sum(dists_sq)
         if len(cluster_points) > 1:
-            centroid = np.mean(cluster_points, axis=0)
-            distances = np.linalg.norm(cluster_points - centroid, axis=1)
-            intra_distances.append(np.mean(distances))
+            intra_distances.append(np.mean(np.sqrt(dists_sq)))
     
     avg_intra_distance = float(np.mean(intra_distances)) if intra_distances else 0.0
     
-    # Calculate inter-cluster distances (separation)
-    centroids = []
-    for label in unique_labels:
-        cluster_points = X[labels == label]
-        centroids.append(np.mean(cluster_points, axis=0))
-    centroids = np.array(centroids)
-    
+    # Inter-cluster distances
     inter_distances = []
     for i in range(len(centroids)):
         for j in range(i + 1, len(centroids)):
             inter_distances.append(np.linalg.norm(centroids[i] - centroids[j]))
-    
     avg_inter_distance = float(np.mean(inter_distances)) if inter_distances else 0.0
     
-    # Davies-Bouldin Index (lower is better)
+    # --- Davies-Bouldin Index (lower is better) ---
     db_index = 0.0
     if n_clusters > 1:
         for i, label_i in enumerate(unique_labels):
             max_ratio = 0.0
-            cluster_i = X[labels == label_i]
-            si = np.mean(np.linalg.norm(cluster_i - centroids[i], axis=1)) if len(cluster_i) > 0 else 0
+            si = np.mean(np.linalg.norm(cluster_points_list[i] - centroids[i], axis=1)) if len(cluster_points_list[i]) > 0 else 0
             
             for j, label_j in enumerate(unique_labels):
                 if i != j:
-                    cluster_j = X[labels == label_j]
-                    sj = np.mean(np.linalg.norm(cluster_j - centroids[j], axis=1)) if len(cluster_j) > 0 else 0
+                    sj = np.mean(np.linalg.norm(cluster_points_list[j] - centroids[j], axis=1)) if len(cluster_points_list[j]) > 0 else 0
                     dij = np.linalg.norm(centroids[i] - centroids[j])
                     if dij > 0:
                         ratio = (si + sj) / dij
@@ -72,23 +84,75 @@ def calculate_clustering_metrics(X: np.ndarray, labels: np.ndarray,
             db_index += max_ratio
         db_index /= n_clusters
     
+    # --- Calinski-Harabasz Index (higher is better) ---
+    ch_index = 0.0
+    if n_clusters > 1 and n_clusters < n_samples:
+        # Between-cluster dispersion
+        bgss = 0.0
+        for i, label in enumerate(unique_labels):
+            n_k = len(cluster_points_list[i])
+            bgss += n_k * np.sum((centroids[i] - global_centroid) ** 2)
+        
+        # Within-cluster dispersion
+        wgss = inertia
+        
+        if wgss > 0:
+            ch_index = (bgss / (n_clusters - 1)) / (wgss / (n_samples - n_clusters))
+    
+    # --- Silhouette Score (-1 to 1, higher is better) ---
+    silhouette_score = 0.0
+    if n_clusters > 1 and n_clusters < n_samples:
+        silhouette_values = np.zeros(n_samples)
+        
+        for idx in range(n_samples):
+            own_label = labels[idx]
+            own_cluster_mask = labels == own_label
+            own_cluster_size = np.sum(own_cluster_mask)
+            
+            # a(i): mean intra-cluster distance
+            if own_cluster_size > 1:
+                own_cluster_points = X[own_cluster_mask]
+                a_i = np.mean(np.linalg.norm(own_cluster_points - X[idx], axis=1))
+            else:
+                a_i = 0.0
+            
+            # b(i): min mean distance to other clusters
+            b_i = float('inf')
+            for label in unique_labels:
+                if label == own_label:
+                    continue
+                other_points = X[labels == label]
+                mean_dist = np.mean(np.linalg.norm(other_points - X[idx], axis=1))
+                b_i = min(b_i, mean_dist)
+            
+            if b_i == float('inf'):
+                b_i = 0.0
+            
+            max_ab = max(a_i, b_i)
+            silhouette_values[idx] = (b_i - a_i) / max_ab if max_ab > 0 else 0.0
+        
+        silhouette_score = float(np.mean(silhouette_values))
+    
     result = {
         "n_clusters": n_clusters,
         "n_samples": n_samples,
         "cluster_sizes": cluster_sizes,
+        "silhouette_score": silhouette_score,
+        "davies_bouldin_index": float(db_index),
+        "calinski_harabasz_index": float(ch_index),
+        "inertia": float(inertia),
         "avg_intra_cluster_distance": avg_intra_distance,
         "avg_inter_cluster_distance": avg_inter_distance,
-        "davies_bouldin_index": float(db_index),
         "compactness_ratio": float(avg_intra_distance / avg_inter_distance) if avg_inter_distance > 0 else float('inf')
     }
     
-    # External validation metrics if ground truth is provided
+    # --- External validation metrics (when ground truth available) ---
     if y_true is not None:
         y_true = np.asarray(y_true).flatten()
         
         # Purity
         total_correct = 0
-        for label in unique_labels:
+        for i, label in enumerate(unique_labels):
             cluster_mask = labels == label
             if np.sum(cluster_mask) > 0:
                 cluster_true = y_true[cluster_mask]
@@ -96,12 +160,107 @@ def calculate_clustering_metrics(X: np.ndarray, labels: np.ndarray,
                 total_correct += np.sum(cluster_true == most_common)
         purity = total_correct / n_samples
         
+        # --- Adjusted Rand Index ---
+        ari = _compute_adjusted_rand_index(y_true.astype(int), labels.astype(int))
+        
+        # --- Normalized Mutual Information ---
+        nmi = _compute_nmi(y_true.astype(int), labels.astype(int))
+        
         result["purity"] = float(purity)
+        result["adjusted_rand_index"] = float(ari)
+        result["normalized_mutual_information"] = float(nmi)
         result["external_validation_available"] = True
     else:
         result["external_validation_available"] = False
     
     return result
+
+
+def _compute_adjusted_rand_index(labels_true: np.ndarray, labels_pred: np.ndarray) -> float:
+    """
+    Compute Adjusted Rand Index (ARI).
+    Measures agreement between two clusterings, adjusted for chance.
+    Range: -0.5 to 1.0 (1.0 = perfect agreement, 0 = random)
+    """
+    n = len(labels_true)
+    classes = np.unique(labels_true)
+    clusters = np.unique(labels_pred)
+    
+    # Contingency table
+    contingency = np.zeros((len(classes), len(clusters)), dtype=int)
+    class_map = {c: i for i, c in enumerate(classes)}
+    cluster_map = {c: i for i, c in enumerate(clusters)}
+    
+    for i in range(n):
+        contingency[class_map[labels_true[i]], cluster_map[labels_pred[i]]] += 1
+    
+    # Row and column sums
+    a = contingency.sum(axis=1)
+    b = contingency.sum(axis=0)
+    
+    # Combinations
+    def comb2(x):
+        return x * (x - 1) / 2
+    
+    sum_comb_nij = np.sum(comb2(contingency))
+    sum_comb_a = np.sum(comb2(a))
+    sum_comb_b = np.sum(comb2(b))
+    comb_n = comb2(n)
+    
+    expected = sum_comb_a * sum_comb_b / comb_n if comb_n > 0 else 0
+    max_index = (sum_comb_a + sum_comb_b) / 2
+    
+    denominator = max_index - expected
+    if denominator == 0:
+        return 0.0 if max_index == 0 else 1.0
+    
+    return float((sum_comb_nij - expected) / denominator)
+
+
+def _compute_nmi(labels_true: np.ndarray, labels_pred: np.ndarray) -> float:
+    """
+    Compute Normalized Mutual Information (NMI).
+    Measures information shared between two clusterings.
+    Range: 0 to 1 (1.0 = perfect agreement)
+    """
+    n = len(labels_true)
+    classes = np.unique(labels_true)
+    clusters = np.unique(labels_pred)
+    
+    # Contingency table
+    contingency = np.zeros((len(classes), len(clusters)), dtype=float)
+    class_map = {c: i for i, c in enumerate(classes)}
+    cluster_map = {c: i for i, c in enumerate(clusters)}
+    
+    for i in range(n):
+        contingency[class_map[labels_true[i]], cluster_map[labels_pred[i]]] += 1
+    
+    # Marginals
+    p_true = contingency.sum(axis=1) / n
+    p_pred = contingency.sum(axis=0) / n
+    p_joint = contingency / n
+    
+    # Entropy
+    def entropy(p):
+        p = p[p > 0]
+        return -np.sum(p * np.log(p))
+    
+    h_true = entropy(p_true)
+    h_pred = entropy(p_pred)
+    
+    # Mutual information
+    mi = 0.0
+    for i in range(len(classes)):
+        for j in range(len(clusters)):
+            if p_joint[i, j] > 0:
+                mi += p_joint[i, j] * np.log(p_joint[i, j] / (p_true[i] * p_pred[j]))
+    
+    # Normalize
+    denominator = (h_true + h_pred) / 2
+    if denominator == 0:
+        return 0.0
+    
+    return float(mi / denominator)
 
 
 class SOM:
@@ -312,15 +471,31 @@ class SOM:
         return errors / len(data)
 
 
-@tool
+class TrainSOMInput(BaseModel):
+    X_train: List[List[float]] = Field(description="Training data matrix as a 2D list of shape (n_samples, n_features)")
+    map_size: Tuple[int, int] = Field(default=(10, 10), description="Grid dimensions as (rows, cols)")
+    learning_rate_initial: float = Field(default=0.5, ge=0.1, le=1.0, description="Initial learning rate")
+    learning_rate_final: float = Field(default=0.01, ge=0.001, le=0.1, description="Final learning rate after decay")
+    neighborhood_initial: float = Field(default=5.0, ge=1.0, le=20.0, description="Initial neighborhood radius in grid units")
+    max_epochs: int = Field(default=1000, ge=500, le=5000, description="Number of training iterations")
+    topology: Literal["rectangular", "hexagonal"] = Field(default="rectangular", description="Grid topology")
+
+
+class InferenceSOMInput(BaseModel):
+    model_id: str = Field(description="The unique model ID returned from train_som_tool"),
+    X_test: List[List[float]] = Field(description="Test data matrix as a 2D list of shape (n_samples, n_features)"),
+    y_true: Optional[List[int]] = Field(default=None, description="Optional ground truth cluster labels for external validation metrics")
+
+
+@tool(args_schema=TrainSOMInput)
 def train_som_tool(
-    X_train: List[List[float]] = Field(description="Training data matrix as a 2D list of shape (n_samples, n_features)"),
-    map_size: Tuple[int, int] = Field(default=(10, 10), description="Grid dimensions as (rows, cols). Larger maps capture more detail"),
-    learning_rate_initial: float = Field(default=0.5, ge=0.1, le=1.0, description="Initial learning rate. Higher values mean faster initial adaptation"),
-    learning_rate_final: float = Field(default=0.01, ge=0.001, le=0.1, description="Final learning rate after decay"),
-    neighborhood_initial: float = Field(default=5.0, ge=1.0, le=20.0, description="Initial neighborhood radius in grid units"),
-    max_epochs: int = Field(default=1000, ge=500, le=5000, description="Number of training iterations"),
-    topology: Literal["rectangular", "hexagonal"] = Field(default="rectangular", description="Grid topology: 'rectangular' or 'hexagonal'")
+    X_train: List[List[float]],
+    map_size: Tuple[int, int] = (10, 10),
+    learning_rate_initial: float = 0.5,
+    learning_rate_final: float = 0.01,
+    neighborhood_initial: float = 5.0,
+    max_epochs: int = 1000,
+    topology: Literal["rectangular", "hexagonal"] = "rectangular"
 ) -> Dict[str, Any]:
     """
     Train a Kohonen Self-Organizing Map (SOM) for clustering and visualization.
@@ -351,15 +526,6 @@ def train_som_tool(
     - Use more epochs for larger maps
     - Start with larger neighborhood_initial for smoother organization
     
-    Args:
-        X_train: Training data as a 2D list (n_samples, n_features).
-        map_size: Grid dimensions (rows, cols). Default: (10, 10).
-        learning_rate_initial: Starting learning rate (0.1-1.0). Default: 0.5.
-        learning_rate_final: Final learning rate (0.001-0.1). Default: 0.01.
-        neighborhood_initial: Initial radius (1.0-20.0). Default: 5.0.
-        max_epochs: Training iterations (500-5000). Default: 1000.
-        topology: Grid topology. Default: "rectangular".
-    
     Returns:
         Dict containing:
             - model_id (str): Unique identifier for the trained model
@@ -370,16 +536,6 @@ def train_som_tool(
             - n_features (int): Number of input features
             - n_samples (int): Number of training samples
             - quantization_error (float): Average distance to BMUs
-    
-    Example:
-        >>> # Cluster customer data
-        >>> result = train_som_tool(
-        ...     X_train=customer_features,
-        ...     map_size=(15, 15),
-        ...     topology="hexagonal",
-        ...     max_epochs=2000
-        ... )
-        >>> print(f"Trained with quantization error: {result['quantization_error']:.4f}")
     """
     try:
         X = np.array(X_train)
@@ -423,9 +579,9 @@ def train_som_tool(
 
 @tool  
 def inference_som_tool(
-    model_id: str = Field(description="The unique model ID returned from train_som_tool"),
-    X_test: List[List[float]] = Field(description="Test data matrix as a 2D list of shape (n_samples, n_features)"),
-    y_true: Optional[List[int]] = Field(default=None, description="Optional ground truth cluster labels for computing external validation metrics")
+    model_id: str,
+    X_test: List[List[float]],
+    y_true: Optional[List[int]] = None,
 ) -> Dict[str, Any]:
     """
     Find Best Matching Units (clusters) for new samples using a trained SOM.
@@ -443,29 +599,14 @@ def inference_som_tool(
     1. Train a SOM using train_som_tool to get a model_id
     2. Use this tool to find cluster assignments for new data
     
-    Args:
-        model_id: Unique identifier from train_som_tool.
-        X_test: Test data as a 2D list (n_samples, n_features).
-    
     Returns:
         Dict containing:
-            - status (str): "success" or "error"
-            - message (str): Status message  
-            - bmu_indices (List[Tuple[int, int]]): BMU (row, col) for each sample
-            - distances (List[float]): Distance from each sample to its BMU
-            - n_samples (int): Number of samples processed
-            - metrics (Dict[str, Any]) Metrics when y_true is provided:
-                - Purity: How well clusters match true labels
-                - Davies-Bouldin Index: Cluster separation quality (lower is better)
-                - Intra/Inter cluster distances: Compactness and separation
-    
-    Example:
-        >>> result = inference_som_tool(
-        ...     model_id="som_abc12345",
-        ...     X_test=[[age, income, spending], ...]
-        ... )
-        >>> for i, (bmu, dist) in enumerate(zip(result['bmu_indices'], result['distances'])):
-        ...     print(f"Sample {i}: Cluster {bmu}, distance {dist:.3f}")
+            - status: "success" or "error"
+            - message: Status message  
+            - bmu_indices: BMU (row, col) for each sample
+            - distances: Distance from each sample to its BMU
+            - n_samples: Number of samples processed
+            - metrics: Metrics when y_true is provided
     """
     try:
         if model_id not in MODEL_STORE:
@@ -487,7 +628,6 @@ def inference_som_tool(
             bmu = model.get_bmu(sample)
             bmu_indices.append(tuple(map(int, bmu)))
             distances.append(float(np.linalg.norm(sample - model.weights[bmu])))
-            # Convert 2D BMU to single cluster label
             cluster_labels.append(bmu[0] * model.map_size[1] + bmu[1])
         
         result = {
@@ -499,13 +639,16 @@ def inference_som_tool(
             "n_samples": len(bmu_indices)
         }
         
-        # Calculate metrics if ground truth is provided
+        # Calculate comprehensive clustering metrics
+        cluster_arr = np.array(cluster_labels)
+        y_true_arr = np.array(y_true) if y_true is not None else None
+        metrics = calculate_clustering_metrics(X, cluster_arr, y_true_arr)
+        result["metrics"] = metrics
+        
+        msg = f"Found BMUs for {len(bmu_indices)} samples. Silhouette: {metrics['silhouette_score']:.3f}, DB: {metrics['davies_bouldin_index']:.3f}"
         if y_true is not None:
-            y_true_arr = np.array(y_true)
-            cluster_arr = np.array(cluster_labels)
-            metrics = calculate_clustering_metrics(X, cluster_arr, y_true_arr)
-            result["metrics"] = metrics
-            result["message"] = f"Found BMUs for {len(bmu_indices)} samples with purity {metrics['purity']*100:.1f}%"
+            msg += f", ARI: {metrics['adjusted_rand_index']:.3f}, NMI: {metrics['normalized_mutual_information']:.3f}"
+        result["message"] = msg
         
         return result
     except Exception as e:
