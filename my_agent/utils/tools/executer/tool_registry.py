@@ -15,7 +15,7 @@ from .aco import aco_tool
 from .pso import pso_tool
 
 
-ALL_TOOLS = [
+EXECUTOR_TOOLS = [
     train_perceptron_tool,
     inference_perceptron_tool,
     train_mlp_tool,
