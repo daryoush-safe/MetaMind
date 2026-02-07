@@ -106,32 +106,36 @@ def get_replanner_model():
 # ============================================================================
 
 def call_executor(state: AgentExecutorState) -> dict:
-    tool = next(t for t in ALL_TOOLS if t.name == state["step_tool_name"])
+    tool_name = state.get("step_tool_name")
+    tool = next((t for t in ALL_TOOLS if t.name == tool_name), None)
+    
     messages = list(state["messages"])
-
     if not any(isinstance(m, SystemMessage) for m in messages):
         messages = [SystemMessage(content=EXECUTOR_SYSTEM_PROMPT)] + messages
 
-    # Check if tool has already been called (tool result exists in messages)
-    tool_already_called = any(
-        isinstance(m, ToolMessage) for m in messages
-    )
-
-    if tool_already_called:
-        # Don't bind tools — let the model respond with plain text summary
+    if tool is None:
+        # No valid tool — just let the model respond as plain text
         executor_model = get_executor_model()
     else:
-        # Force the model to call the tool
-        executor_model = get_executor_model().bind_tools(
-            [tool], tool_choice={"type": "function", "function": {"name": tool.name}}
-        )
+        tool_already_called = any(isinstance(m, ToolMessage) for m in messages)
+        if tool_already_called:
+            executor_model = get_executor_model()
+        else:
+            executor_model = get_executor_model().bind_tools(
+                [tool], tool_choice={"type": "function", "function": {"name": tool.name}}
+            )
 
     response = executor_model.invoke(messages)
     return {"messages": [response]}
 
 
 def should_continue_executor_tools(state: AgentExecutorState) -> str:
-    """Route: if executor made tool calls -> 'continue', else -> 'end'."""
+    tool_name = state.get("step_tool_name")
+    tool = next((t for t in ALL_TOOLS if t.name == tool_name), None)
+    
+    if tool is None:
+        return "end"
+    
     last = state["messages"][-1]
     if hasattr(last, "tool_calls") and last.tool_calls:
         return "continue"

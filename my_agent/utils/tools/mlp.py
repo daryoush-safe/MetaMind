@@ -357,7 +357,7 @@ def cross_validate_mlp(X: np.ndarray, y_onehot: np.ndarray, k: int = 5,
 
 class TrainMLPInput(BaseModel):
     X_train: List[List[float]] = Field(description="Training feature matrix as a 2D list of shape (n_samples, n_features)")
-    y_train: List[List[float]] = Field(description="One-hot encoded labels as a 2D list of shape (n_samples, n_classes)")
+    y_train: Any = Field(description="Labels: either a 1D list of class indices [0,1,2,...] or a 2D one-hot encoded list [[1,0,0],[0,1,0],...]")
     hidden_layers: List[int] = Field(default=[64, 32], description="Number of neurons in each hidden layer")
     activation: Literal["relu", "sigmoid", "tanh"] = Field(default="relu", description="Activation function")
     learning_rate: float = Field(default=0.001, ge=0.0001, le=0.01, description="Learning rate for optimizer")
@@ -378,7 +378,7 @@ class InferenceMLPInput(BaseModel):
 @tool(args_schema=TrainMLPInput)
 def train_mlp_tool(
     X_train: List[List[float]],
-    y_train: List[List[float]],
+    y_train,
     hidden_layers: List[int] = [64, 32],
     activation: Literal["relu", "sigmoid", "tanh"] = "relu",
     learning_rate: float = 0.001,
@@ -443,6 +443,13 @@ def train_mlp_tool(
     try:
         X = np.array(X_train)
         y = np.array(y_train)
+
+        if y.ndim == 1 or (y.ndim == 2 and y.shape[1] == 1):
+            y = y.flatten().astype(int)
+            n_classes = int(y.max()) + 1
+            y_onehot = np.zeros((len(y), n_classes))
+            y_onehot[np.arange(len(y)), y] = 1.0
+            y = y_onehot
         
         if len(X.shape) != 2:
             return {"status": "error", "message": "X_train must be a 2D array"}
