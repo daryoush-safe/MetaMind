@@ -24,7 +24,7 @@ step BEFORE any training/optimization step that needs that data. Use these tools
 
 11. **read_and_preprocess_csv** (read_and_preprocess_csv): Reads CSV files and preprocesses them for ML tasks.
     - Use when the user provides a .csv file for classification, regression, clustering, etc.
-    - Parameters: {"file_path": "/path/to/file.csv", "target_column": "column_name", "test_size": 0.2, "scale_features": true}
+    - Parameters: {"file_path": "/path/to/file.csv", "target_column": "column_name" or None for clustering, "test_size": 0.2, "scale_features": true}
     - Returns: {"X_train": [[...]], "y_train": [...], "X_test": [[...]], "y_test": [...], "feature_names": [...], "n_samples": N, "n_features": M, ...}
 
 === DATA REFERENCE SYSTEM ===

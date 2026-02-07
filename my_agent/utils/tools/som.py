@@ -376,7 +376,10 @@ class SOM:
         self.weights = data_min + np.random.random((rows, cols, n_features)) * (data_max - data_min)
         
         # Time constant for exponential decay
-        time_constant = self.max_epochs / np.log(max(self.radius_initial, 1))
+        if self.radius_initial > 1:
+            time_constant = self.max_epochs / np.log(self.radius_initial)
+        else:
+            time_constant = self.max_epochs
 
         for epoch in range(self.max_epochs):
             # Decay learning rate exponentially
@@ -542,8 +545,18 @@ def train_som_tool(
         
         if len(X.shape) != 2:
             return {"status": "error", "message": "X_train must be a 2D array"}
-        if X.shape[0] < map_size[0] * map_size[1]:
-            return {"status": "error", "message": f"Not enough samples ({X.shape[0]}) for map size {map_size}"}
+        
+        # Auto-adjust map size if too large for the data
+        n_samples = X.shape[0]
+        total_neurons = map_size[0] * map_size[1]
+        
+        if n_samples < total_neurons:
+            # Rule of thumb: ~5 * sqrt(n_samples) total neurons, minimum 2x2
+            ideal_neurons = max(4, int(np.sqrt(n_samples)))
+            side = max(2, int(np.sqrt(ideal_neurons)))
+            map_size = (side, side)
+            # Also scale down neighborhood to fit new map
+            neighborhood_initial = min(neighborhood_initial, max(1.0, side / 2.0))
         
         model = SOM(
             map_size=map_size,
