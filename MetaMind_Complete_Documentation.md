@@ -1894,32 +1894,116 @@ Data store updated with keys: ['X_train', 'y_train', 'X_test', 'y_test', 'featur
 📍 [REPLANNER]
    ✅ Task completed!
 
+
+### Example 4: Clustering
+
+**Input**:
+```
+User: "Discover natural groupings (clustering) in unlabeled data. data path: tasks/clustering/sample.csv"
+```
+
+**Generated Plan**:
+```python
+Plan(
+    problem_type="clustering",
+    selected_method="SOM",
+    reasoning=(
+        "SOM is suitable for clustering and can handle high-dimensional data. "
+        "It's a good choice when the number of clusters is not known beforehand."
+    ),
+    steps=[
+        PlanStep(
+            step_id=1,
+            description="Load and preprocess the CSV dataset",
+            tool_name="read_and_preprocess_csv",
+            tool_args={
+                "file_path": "tasks/clustering/sample.csv",
+                "target_column": None,
+                "test_size": 0.2,
+                "scale_features": True,
+            },
+            status="pending",
+            result=None,
+            error=None,
+        ),
+        PlanStep(
+            step_id=2,
+            description="Train SOM on the preprocessed data",
+            tool_name="train_som_tool",
+            tool_args={
+                "X_train": "$DATA.X_train",
+                "map_size": [10, 10],
+                "learning_rate_initial": 0.5,
+                "learning_rate_final": 0.01,
+                "neighborhood_initial": 5.0,
+                "max_epochs": 1000,
+                "topology": "rectangular",
+            },
+            status="pending",
+            result=None,
+            error=None,
+        ),
+        PlanStep(
+            step_id=3,
+            description="Assign cluster labels using the trained SOM",
+            tool_name="inference_som_tool",
+            tool_args={
+                "model_id": "$MODEL",
+                "X_test": "$DATA.X_train",
+            },
+            status="pending",
+            result=None,
+            error=None,
+        ),
+    ],
+    backup_method="K-Means",
+    confidence=0.8,
+)
+```
+
+**Output**:
+```
+📍 [PLANNER]
+   Problem type: clustering
+   Selected method: SOM    
+   Confidence: 80%
+   Steps: 3
+Data store updated with keys: ['X_train', 'X_test', 'feature_names', 'n_samples', 'n_features', 'mode', 'preprocessing_log']
+
+📍 [AGENT]
+   Executed step 3: Infer cluster labels using the trained SOM
+   Status: unknown
+
+📍 [REPLANNER]
+   ✅ Task completed!
+
 ══════════════════════════════════════════════════
 📊 FINAL RESULT
 ══════════════════════════════════════════════════
 ## Results Analysis
 
-**Performance Assessment:** GOOD
-- The MLP model was successfully trained and evaluated on the test set. Although specific accuracy metrics are not available, the prediction probabilities suggest high confidence in the model's predictions.
+**Performance Assessment:** ACCEPTABLE
+- The SOM was trained and used for clustering, but without ground truth or specific clustering metrics, it's challenging to assess the quality directly.
 
-**Key Metrics:**
-- Prediction probabilities for the test set: [[0.9938, 0.0062], [5.37e-10, 0.9999], [4.20e-5, 0.9999]]
-- Prediction probabilities for the given customer: [[1.0, 7.81e-59]]
+**Key Metrics**:
+- Number of clusters identified: 4
+- Map size: 2x2
+- Number of samples: 13
+- Clustering labels: [2, 2, 2, 0, 0, 0, 0, 0, 3, 3, 3, 3, 3]
 
-**Observations:**
-- The model shows high confidence in its predictions, with probabilities close to 0 or 1.
-- The customer with age 45, Income 40, and spending 12 is predicted to be male with a probability of 1.0.
+**Observations**:
+- The clustering indicates that the samples are grouped into 4 clusters, with some clusters having more members than others.
+- Without additional context or metrics, it's difficult to assess the optimality of the clustering.
 
-**Recommendations:**
-1. Collect more data to further evaluate the model's performance and potentially improve it.
-2. Consider tuning hyperparameters (e.g., architecture, learning rate) for better performance.
+**Recommendations**:
+1. Evaluate the clustering quality using metrics like the silhouette score or Davies-Bouldin index.
+2. Consider tuning the SOM parameters (e.g., map size, learning rate) for potentially better clustering.
+3. Visualize the SOM to understand the distribution and density of the clusters.
 
-**Confidence in Solution:** HIGH
-- The model's predictions show high confidence, indicating a reliable classification.
+**Confidence in Solution:** MEDIUM
+- The SOM was successfully applied, but the lack of metrics and the small dataset size limit the confidence in the clustering quality.
 
-The gender of the customer (age: 45, Income: 40, spending: 12) is predicted to be **Male** with a probability of 1.0.
-
-📝 Total messages in history: 8
+📝 Total messages in history: 7
 ══════════════════════════════════════════════════
 ```
 
