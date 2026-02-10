@@ -15,7 +15,7 @@ from .aco import aco_tool
 from .pso import pso_tool
 from .tsp import read_tsp_file
 from .csv import read_and_preprocess_csv
-
+from .memory import search_memory_tool, add_memory_tool, clear_memory_tool
 
 ALL_TOOLS = [
     train_perceptron_tool,
@@ -35,11 +35,16 @@ ALL_TOOLS = [
     pso_tool,
     read_tsp_file,
     read_and_preprocess_csv,
+    
+    search_memory_tool,
+    add_memory_tool,
+    clear_memory_tool,
 ]
 
 
 DATA_LOADING_TOOLS = {"read_tsp_file", "read_and_preprocess_csv"}
 
+MEMORY_TOOLS = {"search_memory_tool", "add_memory_tool", "clear_memory_tool"}
 
 DATA_TOOL_OUTPUT_KEYS = {
     "read_tsp_file": [
